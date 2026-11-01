@@ -1,0 +1,9 @@
+node_modules
+.git
+.env
+tmp
+uploads
+*.mp4
+*.mov
+*.3gp
+README.md
