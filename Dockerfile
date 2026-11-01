@@ -1,16 +1,19 @@
 FROM node:20-bookworm-slim
 
-ENV NODE_ENV=production
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
 COPY package*.json ./
-RUN npm install --omit=dev && npm cache clean --force
-COPY src ./src
-RUN chown -R node:node /app
-USER node
+RUN npm install
+
+COPY . .
+
+RUN mkdir -p temp
+
+ENV NODE_ENV=production
 
 EXPOSE 3000
+
 CMD ["npm", "start"]
