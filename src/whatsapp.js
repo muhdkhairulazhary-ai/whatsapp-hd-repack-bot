@@ -1,4 +1,3 @@
-import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { config } from './config.js';
 import { isAllowedMediaUrl } from './security.js';
@@ -53,6 +52,7 @@ export async function downloadMedia(mediaId, destination, maxBytes) {
 
 export async function uploadMedia(filePath) {
   const size = (await stat(filePath)).size;
+  if (size > config.maxOutputBytes) throw new Error('Processed video is too large to upload.');
   const form = new FormData();
   form.set('messaging_product', 'whatsapp');
   form.set('type', 'video/mp4');
