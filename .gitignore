@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+!.env.example
+tmp/
+uploads/
+*.mp4
+*.mov
+*.3gp
+.DS_Store
+npm-debug.log*
