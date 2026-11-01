@@ -19,7 +19,37 @@ export function buildFfmpegArgs(inputPath, outputPath) {
   ];
 }
 
+function probeDuration(inputPath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1', inputPath
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('Video inspection timed out. Try a shorter video.'));
+    }, 15000);
+    child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+    child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-1000); });
+    child.once('error', error => { clearTimeout(timer); reject(new Error(`FFprobe could not start: ${error.message}`)); });
+    child.once('close', code => {
+      clearTimeout(timer);
+      const duration = Number(stdout.trim());
+      if (code !== 0 || !Number.isFinite(duration) || duration <= 0) {
+        reject(new Error(`Could not read video duration: ${stderr.slice(-500)}`));
+      } else resolve(duration);
+    });
+  });
+}
+
 export async function repackVideo(inputPath, outputPath) {
+  const duration = await probeDuration(inputPath);
+  if (duration > config.maxVideoSeconds) {
+    throw new Error(`This video is longer than the ${config.maxVideoSeconds}-second limit. Please send a shorter clip.`);
+  }
+
   await new Promise((resolve, reject) => {
     const child = spawn('ffmpeg', buildFfmpegArgs(inputPath, outputPath), { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
