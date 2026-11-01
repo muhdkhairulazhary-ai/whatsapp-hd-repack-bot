@@ -82,7 +82,7 @@ async function handleWebhook(payload) {
             await sendVideo(sender, mediaId);
           } catch (error) {
             logger.warn({ err: error, sender }, 'Could not process incoming video');
-            const safeMessage = error.message.includes('larger than') || error.message.includes('too large') || error.message.includes('Unsupported') || error.message.includes('timed out')
+            const safeMessage = error.message.includes('larger than') || error.message.includes('too large') || error.message.includes('Unsupported') || error.message.includes('timed out') || error.message.includes('longer than')
               ? error.message
               : 'Sorry, I could not process that video. Please try a shorter MP4 video and send it again.';
             await sendText(sender, `❌ ${safeMessage}`).catch(() => {});
