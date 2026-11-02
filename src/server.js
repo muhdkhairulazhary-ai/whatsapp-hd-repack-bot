@@ -1,4 +1,5 @@
 import express from 'express';
+import converterRouter from './converter.js';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -12,6 +13,8 @@ import { downloadMedia, sendText, uploadMedia, sendVideo } from './whatsapp.js';
 
 const logger = pino({ level: config.logLevel, redact: ['*.authorization', '*.headers.Authorization'] });
 const app = express();
+app.use(express.static('public'));
+app.use(converterRouter);
 
 // Keep the exact raw bytes for Meta's X-Hub-Signature-256 verification.
 app.get('/webhook', (req, res) => {
