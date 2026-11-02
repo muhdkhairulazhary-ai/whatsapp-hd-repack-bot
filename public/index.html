@@ -1,0 +1,138 @@
+
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>StatusHD Converter</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px 16px;
+      background: #0f172a; color: white;
+      font-family: -apple-system, Arial, sans-serif;
+    }
+    main { max-width: 480px; margin: 40px auto; }
+    h1 { color: #4ade80; margin-bottom: 8px; }
+    p { color: #cbd5e1; line-height: 1.5; }
+    .panel {
+      background: #1e293b; padding: 22px;
+      border-radius: 18px; margin-top: 24px;
+    }
+    input, select, button { width: 100%; margin-top: 16px; }
+    input { font-size: 15px; }
+    select, button {
+      padding: 15px; border: 0;
+      border-radius: 12px; font-size: 16px;
+    }
+    button {
+      background: #22c55e; color: #052e16;
+      font-weight: bold; cursor: pointer;
+    }
+    button:disabled { opacity: .5; }
+    video { width: 100%; margin-top: 16px; border-radius: 12px; }
+    #status { margin-top: 18px; }
+    #download {
+      display: none; text-align: center;
+      padding: 15px; margin-top: 16px;
+      background: #22c55e; color: #052e16;
+      border-radius: 12px; font-weight: bold;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>🎬 StatusHD Converter</h1>
+  <p>Convert video HD untuk WhatsApp Status.
+     Sesuai digunakan melalui Safari iPhone.</p>
+
+  <div class="panel">
+    <strong>Upload Video (Max 100 MB)</strong>
+    <input id="file" type="file" accept="video/*">
+
+    <video id="preview" controls playsinline hidden></video>
+
+    <select id="quality">
+      <option value="hd">High Quality HD</option>
+      <option value="small">Compress bawah 32 MB</option>
+    </select>
+
+    <button id="convert">Convert Video HD</button>
+    <p id="status"></p>
+    <a id="download">Download Video MP4</a>
+  </div>
+</main>
+
+<script>
+const fileInput = document.getElementById('file');
+const preview = document.getElementById('preview');
+const button = document.getElementById('convert');
+const status = document.getElementById('status');
+const download = document.getElementById('download');
+let previewUrl;
+
+fileInput.addEventListener('change', () => {
+  const file = fileInput.files[0];
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  preview.hidden = true;
+  download.style.display = 'none';
+  status.textContent = '';
+
+  if (!file) return;
+  if (file.size > 100 * 1024 * 1024) {
+    status.textContent = '❌ Video melebihi 100 MB.';
+    fileInput.value = '';
+    return;
+  }
+  previewUrl = URL.createObjectURL(file);
+  preview.src = previewUrl;
+  preview.hidden = false;
+});
+
+button.addEventListener('click', async () => {
+  const file = fileInput.files[0];
+  if (!file) {
+    status.textContent = 'Sila pilih video dahulu.';
+    return;
+  }
+
+  button.disabled = true;
+  download.style.display = 'none';
+  status.textContent = '⏳ Upload dan convert video...';
+
+  try {
+    const form = new FormData();
+    form.append('video', file);
+    form.append('quality',
+      document.getElementById('quality').value);
+
+    const response = await fetch('/api/convert', {
+      method: 'POST',
+      body: form
+    });
+
+    if (!response.ok) {
+      let message = 'Conversion failed';
+      try {
+        const data = await response.json();
+        message = data.error || message;
+      } catch {}
+      throw new Error(message);
+    }
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    download.href = url;
+    download.download = 'statushd-converted.mp4';
+    download.style.display = 'block';
+    status.textContent = '✅ Video siap!';
+  } catch (error) {
+    status.textContent = '❌ ' + error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
