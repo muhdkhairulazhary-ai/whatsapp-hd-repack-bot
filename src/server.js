@@ -13,6 +13,10 @@ import { downloadMedia, sendText, uploadMedia, sendVideo } from './whatsapp.js';
 
 const logger = pino({ level: config.logLevel, redact: ['*.authorization', '*.headers.Authorization'] });
 const app = express();
+// In-memory conversation state. Resets when the service restarts.
+const pendingMedia = new Map();
+const MEDIA_TTL_MS = 30 * 60 * 1000;
+const recentMessages = new Map();
 app.use(express.static('public'));
 app.use(converterRouter);
 
@@ -55,34 +59,52 @@ async function handleWebhook(payload) {
       for (const message of change.value?.messages ?? []) {
         const sender = message.from;
         if (!sender) continue;
+        const now = Date.now();
+        for (const [id, expiry] of recentMessages) if (expiry < now) recentMessages.delete(id);
+        if (message.id && recentMessages.has(message.id)) continue;
+        if (message.id) recentMessages.set(message.id, now + MEDIA_TTL_MS);
         try {
           if (message.type === 'text') {
             const command = parseCommand(message.text?.body);
-            if (command === 'help') await sendText(sender, HELP_TEXT);
+            if (command === 'media') {
+              pendingMedia.set(sender, { expires: Date.now() + MEDIA_TTL_MS });
+              await sendText(sender, 'Caption disimpan. Sekarang kirim video sebagai Dokumen agar kualitasnya terjaga.');
+            }
+            else if (command === 'help') await sendText(sender, HELP_TEXT);
             else if (command === 'ping') await sendText(sender, '🏓 Pong! The bot is responding.');
             else if (command === 'status') await sendText(sender, '✅ Bot is online and ready to process videos.');
             else await sendText(sender, 'I did not recognise that command. Send HELP for instructions, or send me a video.');
             continue;
           }
 
-          if (message.type !== 'video' || !message.video?.id) {
+          const media = message.type === 'document' ? message.document : message.video;
+          const isDocument = message.type === 'document';
+          if (!['video', 'document'].includes(message.type) || !media?.id) {
             await sendText(sender, 'Please send a video message, or send HELP to see available commands.');
             continue;
           }
 
-          await sendText(sender, '⏳ Video received. I am repacking it now—please wait.');
+          const session = pendingMedia.get(sender);
+          if (session && session.expires < Date.now()) pendingMedia.delete(sender);
+          await sendText(sender, '⏳ Video diterima. Sedang memproses, sila tunggu...');
           const workDir = await mkdtemp(path.join(os.tmpdir(), 'wa-repack-'));
           const inputPath = path.join(workDir, `${crypto.randomUUID()}.input`);
           const outputPath = path.join(workDir, `${crypto.randomUUID()}.mp4`);
           try {
-            const mime = message.video.mime_type || 'video/mp4';
-            if (!['video/mp4', 'video/quicktime', 'video/3gpp', 'video/x-msvideo', 'video/webm'].includes(mime)) {
+            const mime = (media.mime_type || '').split(';')[0].toLowerCase();
+            const filename = isDocument ? (media.filename || '') : '';
+            const supportedExtension = /\.(mp4|mov|m4v|3gp|avi|webm)$/i.test(filename);
+            if (isDocument && !supportedExtension && !['video/mp4', 'video/quicktime', 'video/3gpp', 'video/x-msvideo', 'video/webm'].includes(mime)) {
+              throw new Error('Unsupported video format. Please send a video document in MP4 or MOV format.');
+            }
+            if (!['video/mp4', 'video/quicktime', 'video/3gpp', 'video/x-msvideo', 'video/webm'].includes(mime) && !supportedExtension) {
               throw new Error('Unsupported video format. Please send MP4, MOV, 3GP, AVI or WebM.');
             }
-            await downloadMedia(message.video.id, inputPath, config.maxInputBytes);
+            await downloadMedia(media.id, inputPath, config.maxInputBytes);
             await repackVideo(inputPath, outputPath);
             const mediaId = await uploadMedia(outputPath);
             await sendVideo(sender, mediaId);
+            pendingMedia.delete(sender);
           } catch (error) {
             logger.warn({ err: error, sender }, 'Could not process incoming video');
             const safeMessage = error.message.includes('larger than') || error.message.includes('too large') || error.message.includes('Unsupported') || error.message.includes('timed out') || error.message.includes('longer than')
