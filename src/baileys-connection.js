@@ -5,6 +5,9 @@ const CONNECT_DEADLINE_MS = 60_000;
 const PHONE_NOTIFICATION_EVENT = 'CB:notification,type:link_code_companion_reg';
 const SIGNED_PAIR_EVENT = 'CB:iq,,pair-success';
 const MAX_RETRIES = 3;
+const MAX_STORAGE_RETRIES = 6;
+const STARTUP_BUFFER_MS = 30_000;
+const MAX_STARTUP_MESSAGES = 32;
 const STORAGE_RETRY_REASONS = new Set(['auth_storage_busy', 'auth_storage_unavailable', 'auth_lease_lost',
   'credential_storage_failed']);
 const AUTH_FAILURE_REASONS = new Set([...STORAGE_RETRY_REASONS, 'auth_data_invalid', 'auth_migration_failed',
@@ -20,8 +23,10 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
   let retryTimer;
   let starting;
   let stopped = false;
-  let retries = 0;
+  let socketRetries = 0;
+  let storageRetries = 0;
   let connected = false;
+  let recoveryStartedAt = now();
   let status = { status: 'connecting' };
 
   function report(next, reason, statusCode) {
@@ -30,13 +35,21 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
   }
 
   function scheduleRetry(pairing, reason, statusCode, storage = false) {
-    if (stopped || retries >= (storage ? 6 : MAX_RETRIES)) return;
-    const delay = 1_000 * (2 ** retries++);
+    const retries = storage ? storageRetries : socketRetries;
+    if (stopped) return;
+    if (retries >= (storage ? MAX_STORAGE_RETRIES : MAX_RETRIES)) {
+      log.warn?.({ reason, attempts: retries }, 'WhatsApp retry budget exhausted');
+      return;
+    }
+    if (storage) storageRetries++;
+    else socketRetries++;
+    const delay = statusCode !== undefined && statusCode === reasons.restartRequired ? 0 : 1_000 * (2 ** retries);
     report('connecting', reason, statusCode);
+    log.info({ reason, delayMs: delay }, 'WhatsApp retry scheduled');
     retryTimer = schedule(() => {
       retryTimer = undefined;
       void start(pairing);
-    }, statusCode !== undefined && statusCode === reasons.restartRequired ? 0 : delay);
+    }, delay);
   }
 
   function start(pairing = false) {
@@ -68,8 +81,13 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         }
       }
 
+      const restoring = Boolean(state.creds.account);
+      if (restoring) log.info({ reason: 'stored_auth_available' }, 'WhatsApp auth restored');
       const sock = makeSocket(state, code => onNotificationError(code));
       let deadline;
+      let startupTimer;
+      let sawNotify = false;
+      const beforeOpen = [];
       let openedAt;
       let transportOpened = sock.ws.isOpen;
       let pairingRequested = false;
@@ -106,9 +124,48 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         });
       }
 
+      function dispatchMessages(event) {
+        if (!sawNotify && event.type === 'notify' && event.messages?.length) {
+          sawNotify = true;
+          log.info({ reason: 'first_notify_dispatched', count: event.messages.length }, 'WhatsApp message events active');
+        }
+        try {
+          Promise.resolve(onMessages(sock, event)).catch(() => log.error('WhatsApp message handling failed'));
+        } catch {
+          log.error('WhatsApp message handling failed');
+        }
+      }
+
       function handleMessages(event) {
-        if (!isCurrent() || !connected) return;
-        Promise.resolve(onMessages(sock, event)).catch(() => log.error('WhatsApp message handling failed'));
+        if (!isCurrent()) return;
+        if (restoring && event.type === 'append' &&
+            (openedAt === undefined || now() - openedAt <= STARTUP_BUFFER_MS)) {
+          // Baileys labels offline deliveries as append. Accept only messages
+          // sent during this recovery window, never a historical sync batch.
+          const since = Math.ceil(recoveryStartedAt / 1000);
+          const messages = event.messages.filter(message => {
+            const timestamp = Number(message.messageTimestamp);
+            return message.key?.id && !message.key.fromMe && Number.isSafeInteger(timestamp) && timestamp >= since;
+          });
+          if (!messages.length) return;
+          event = { type: 'notify', messages };
+        }
+        if (connected) {
+          dispatchMessages(event);
+        } else if (restoring && event.type === 'notify') {
+          const room = MAX_STARTUP_MESSAGES - beforeOpen.length;
+          if (room > 0 && event.messages?.length) beforeOpen.push(...event.messages.slice(0, room));
+        }
+      }
+
+      function checkStartupBuffer() {
+        if (!isCurrent() || !connected || !sock.ev.isBuffering?.()) return;
+        // 6.7.24 starts buffering restored sessions before WA sends the offline
+        // marker. It also normally allows 20 seconds for initial history sync.
+        // Without the marker or successful history completion, notify batches
+        // can stay buffered even though the authenticated socket is open.
+        log.warn?.({ reason: 'startup_event_buffer_flushed' }, 'WhatsApp startup event buffer still pending');
+        sock.ev.flush();
       }
 
       function onTransportOpen() {
@@ -153,11 +210,14 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
 
       async function finishClose(reason, statusCode, alreadyClosed) {
         connected = false;
+        if (openedAt !== undefined) recoveryStartedAt = now();
         const hadCode = status.status === 'pairing_code_ready';
         const expired = reason === 'pairing_phone_notification_missing' || (hadCode && alreadyClosed);
         const waitForManualRetry = expired || reason === 'pairing_hello_rejected' ||
           reason === 'pairing_phone_reference_mismatch' || phoneConfirmationReceived || signedPairReceived;
         cancel(deadline);
+        cancel(startupTimer);
+        beforeOpen.length = 0;
         sock.ws.off('open', onTransportOpen);
         sock.ws.off(PHONE_NOTIFICATION_EVENT, onPhoneConfirmation);
         sock.ws.off(SIGNED_PAIR_EVENT, onSignedPair);
@@ -180,7 +240,10 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
           report('connection_failed', reason, statusCode);
           return;
         }
-        if (openedAt !== undefined && now() - openedAt >= 60_000) retries = 0;
+        if (openedAt !== undefined && now() - openedAt >= 60_000) {
+          socketRetries = 0;
+          storageRetries = 0;
+        }
         if (STORAGE_RETRY_REASONS.has(reason)) {
           scheduleRetry(false, reason, statusCode, true);
           return;
@@ -189,7 +252,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         scheduleRetry(pairing, reason, statusCode);
       }
 
-      async function onUpdate({ connection, qr, isNewLogin, lastDisconnect }) {
+      async function onUpdate({ connection, qr, isNewLogin, lastDisconnect, receivedPendingNotifications }) {
         if (!isCurrent()) return;
         if (connection === 'close') {
           const error = lastDisconnect?.error;
@@ -204,11 +267,19 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
           }
           return close(reason, statusCode, true);
         }
+        if (receivedPendingNotifications) {
+          log.info({ reason: 'offline_notifications_received' }, 'WhatsApp startup sync progress');
+        }
         if (connection === 'open') {
+          if (connected) return;
           cancel(deadline);
           openedAt = now();
           connected = true;
-          report('already_linked');
+          report('already_linked', 'whatsapp_open');
+          if (beforeOpen.length) dispatchMessages({ type: 'notify', messages: beforeOpen.splice(0) });
+          if (restoring && typeof sock.ev.isBuffering === 'function') {
+            startupTimer = schedule(checkStartupBuffer, STARTUP_BUFFER_MS);
+          }
           return;
         }
         if (isNewLogin) {
@@ -263,7 +334,9 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
       if (!active && !starting && !retryTimer && !stopped && phone &&
           (status.reason === 'pairing_required' ||
            (refresh && ['connection_failed', 'pairing_code_expired'].includes(status.status)))) {
-        retries = 0;
+        socketRetries = 0;
+        storageRetries = 0;
+        recoveryStartedAt = now();
         void start(true);
       }
       return status;

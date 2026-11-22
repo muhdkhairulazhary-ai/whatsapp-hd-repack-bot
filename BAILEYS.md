@@ -116,3 +116,9 @@ Images are validated by content and decoded with ImageMagick. The Docker build s
 3. Send an H.264/AAC 1080p MP4, an iPhone HEVC MOV, a rotated JPEG, a transparent PNG and a HEIC document. Check that replies have no captions. Confirm the counts in `.status`.
 4. Send an oversized or unsupported file and check the Malay reply. Send several files together and check the wait and queue-full replies.
 5. On a staging instance with persistent storage, restart the process and confirm the account counts and WhatsApp session return without re-linking.
+
+### Diagnose a restart with an open socket and no replies
+
+In Render logs, look for `auth_lease_acquired`, `stored_auth_available`, and `whatsapp_open` in that order. `auth_storage_busy` means the old process still owns the lease or its lease is waiting to expire. Recovery retries with backoff while keeping the encrypted state. A successful storage recovery still leaves the socket its own reconnect budget.
+
+After WhatsApp opens, `offline_notifications_received` marks completion of the server's offline batch and `first_notify_dispatched` shows that the app received a message batch. If Baileys still has a buffered batch 30 seconds after open, the bot flushes it and logs `startup_event_buffer_flushed`. The bot accepts fresh offline deliveries from the current recovery window and ignores older history. If a fresh `.menu` still receives no reply, check for the message-receive or init-query warning and the numeric status code. These logs exclude message contents, identifiers and auth data.

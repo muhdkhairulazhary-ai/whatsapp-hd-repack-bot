@@ -87,10 +87,14 @@ test('registration rejection, timeout and malformed reply never return a code', 
 
 test('diagnostic logger forwards only allowlisted numeric notification error data', () => {
   const received = [];
-  const logger = createBaileysDiagnosticLogger(pino({ level: 'silent' }), data => received.push(data));
+  const receiveErrors = [];
+  const logger = createBaileysDiagnosticLogger(pino({ level: 'silent' }), data => received.push(data),
+    (...data) => receiveErrors.push(data));
   logger.error({ err: { data: 406, stack: 'private-stack' } }, "unexpected error in 'handling notification'");
   logger.child({ phone }).error({ err: { data: phone } }, "unexpected error in 'handling notification'");
   logger.error({ err: { data: 429 } }, 'other private message');
   logger.trace({ qr: 'private-qr' }, 'private trace');
+  logger.error({ error: { output: { statusCode: 503 }, message: 'private' }, node: { jid: phone } }, 'error in handling message');
   assert.deepEqual(received, [406, undefined]);
+  assert.deepEqual(receiveErrors, [['message_receive_failed', 503]]);
 });
