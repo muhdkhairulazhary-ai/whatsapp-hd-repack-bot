@@ -1,0 +1,23 @@
+name: Baileys experimental checks
+on:
+  push:
+    branches:
+      - feature/baileys-whatsapp-bot
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Check syntax
+        run: node --check src/baileys-server.js
+      - name: Run existing tests
+        run: npm test
+      - name: Build Docker image
+        run: docker build -t whatsapp-hd-baileys:test .
