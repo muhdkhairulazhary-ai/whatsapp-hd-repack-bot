@@ -3,6 +3,9 @@ on:
   push:
     branches:
       - feature/baileys-whatsapp-bot
+  pull_request:
+    branches:
+      - feature/baileys-whatsapp-bot
   workflow_dispatch:
 jobs:
   verify:
@@ -14,10 +17,12 @@ jobs:
         with:
           node-version: '20'
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
       - name: Check syntax
-        run: node --check src/baileys-server.js
-      - name: Run existing tests
+        run: for file in src/*.js test/*.js; do node --check "$file" || exit; done
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Run tests
         run: npm test
       - name: Build Docker image
         run: docker build -t whatsapp-hd-baileys:test .
