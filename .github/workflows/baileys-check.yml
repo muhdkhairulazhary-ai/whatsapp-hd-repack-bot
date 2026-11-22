@@ -21,7 +21,7 @@ jobs:
       - name: Check syntax
         run: for file in src/*.js test/*.js; do node --check "$file" || exit; done
       - name: Install media tools
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick libheif-plugin-libde265
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick libheif-plugin-libde265 redis-server
       - name: Run tests
         run: npm test
       - name: Build Docker image

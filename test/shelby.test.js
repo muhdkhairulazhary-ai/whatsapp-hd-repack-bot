@@ -146,18 +146,36 @@ test('bounded queue processes one job at a time, ignores duplicates and its own 
   await handler.stop();
 });
 
-test('job deadline aborts a stalled media stream and releases the queue', async t => {
+test('a stalled job times out and a queued job gets its own full deadline', async t => {
   const directory = await temporary(t);
+  const png = path.join(directory, 'queue-fixture.png');
+  await run('convert', ['-size', '12x12', 'xc:red', png]);
+  const bytes = await readFile(png);
   const errors = [];
+  let downloading;
+  const downloadStarted = new Promise(resolve => { downloading = resolve; });
   const handler = createMessageHandler({
     jobTimeoutMs: 1000, tempRoot: directory,
     log: { error: fields => errors.push(fields) },
-    async downloadMediaMessage() { return new Readable({ read() {} }); }
+    async downloadMediaMessage(msg) {
+      if (msg.key.id === 'stalled') {
+        downloading();
+        return new Readable({ read() {} });
+      }
+      return Readable.from([bytes]);
+    }
   });
-  await handler({ sendMessage: async () => {} }, event('stalled', { imageMessage: {} }));
+  const sent = [];
+  const sock = { sendMessage: async (_, message) => { sent.push(message); } };
+  const stalled = handler(sock, event('stalled', { imageMessage: {} }));
+  await downloadStarted;
+  const queued = handler(sock, event('queued', { imageMessage: {} }));
+  await Promise.all([stalled, queued]);
+  assert.equal(errors.length, 1);
   assert.equal(errors[0].stage, 'download');
   assert.equal(errors[0].reason, 'timeout');
-  assert.deepEqual(await readdir(directory), []);
+  assert.equal(sent.filter(message => message.image).length, 1);
+  assert.deepEqual(await readdir(directory), ['queue-fixture.png']);
   await handler.stop();
 });
 

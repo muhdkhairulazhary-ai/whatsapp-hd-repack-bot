@@ -60,7 +60,7 @@ In the service dashboard, open **Environment** and add these values. Use the act
 | `NODE_ENV` | `production` |
 | `PORT` | `3000` (Render may inject its own PORT; the app respects it) |
 
-Optional limits (defaults shown): `MAX_INPUT_BYTES=16777216`, `MAX_OUTPUT_BYTES=16777216`, `MAX_VIDEO_SECONDS=300`, `FFMPEG_TIMEOUT_MS=180000`, `VIDEO_MAX_WIDTH=1280`, `VIDEO_CRF=28`, `VIDEO_MAXRATE=1800k`, `VIDEO_AUDIO_BITRATE=96k`.
+Optional limits (defaults shown): `MAX_INPUT_BYTES=16777216`, `MAX_OUTPUT_BYTES=16777216`, `MAX_VIDEO_SECONDS=300`, `FFMPEG_TIMEOUT_MS=600000`, `VIDEO_MAX_WIDTH=1280`, `VIDEO_CRF=28`, `VIDEO_MAXRATE=1800k`, `VIDEO_AUDIO_BITRATE=96k`.
 
 After saving environment variables, trigger a redeploy if Render does not do it automatically.
 

@@ -280,3 +280,23 @@ test('1080×1920 HEVC conversion keeps frame rate and rejects over-limit output 
   assert.equal(sent.some(message => message.video), false);
   assert.match(sent.at(-1).text, /had penghantaran/);
 });
+
+test('FFmpeg progress only reports numeric metrics and distinguishes job deadlines and crashes', async () => {
+  const { runTool } = await import('../src/ffmpeg.js');
+  const updates = [];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort('job_deadline'), 150);
+  try {
+    await assert.rejects(runTool('sh', ['-c', 'printf "frame=42\\nspeed=1.5x\\nout_time_us=2000000\\nprivate=secret\\n" >&3; exec sleep 30'], {
+      stage: 'ffmpeg', timeoutMs: 1000, signal: controller.signal, progressIntervalMs: 30,
+      onProgress: update => updates.push(update)
+    }), error => error.reason === 'timeout' && error.details.stopSource === 'job_deadline');
+  } finally {
+    clearTimeout(timer);
+  }
+  assert.ok(updates.some(update => update.frames === 42 && update.outputTimeMs === 2000 && update.speed === 1.5));
+  assert.doesNotMatch(JSON.stringify(updates), /private|secret/);
+  await assert.rejects(runTool('sh', ['-c', 'ulimit -c 0; kill -SEGV $$'], {
+    stage: 'ffmpeg', timeoutMs: 1000
+  }), error => error.reason === 'tool_crashed' && error.details.signal === 'SIGSEGV');
+});

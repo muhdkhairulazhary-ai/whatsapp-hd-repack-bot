@@ -51,7 +51,7 @@ export function createMessageHandler({
   downloadMediaMessage, log, privateLogger, accounts, tempRoot = os.tmpdir(),
   concurrency = Number(process.env.BOT_MEDIA_CONCURRENCY ?? 1),
   queueCapacity = Number(process.env.BOT_MEDIA_QUEUE_SIZE ?? 4),
-  jobTimeoutMs = Number(process.env.BOT_MEDIA_JOB_TIMEOUT_MS ?? 360_000),
+  jobTimeoutMs = Number(process.env.BOT_MEDIA_JOB_TIMEOUT_MS ?? 900_000),
   maxBytes = Number(process.env.BAILEYS_MAX_INPUT_BYTES ?? MAX_STATUS_INPUT_BYTES),
   maxOutputBytes = Number(process.env.BAILEYS_MAX_OUTPUT_BYTES ?? MAX_STATUS_INPUT_BYTES),
   downloadTimeoutMs = DOWNLOAD_TIMEOUT_MS
@@ -102,7 +102,7 @@ export function createMessageHandler({
     let downloadTimer;
     let downloadTimedOut = false;
     const { signal } = controller;
-    const jobTimer = setTimeout(() => controller.abort(), jobTimeoutMs);
+    const jobTimer = setTimeout(() => controller.abort('job_deadline'), jobTimeoutMs);
     const rejectSize = () => new VideoError('validation', 'input_limit', 'Input exceeds the size limit.', { limitBytes: maxBytes });
     try {
       const declaredBytes = Number(media.fileLength);
@@ -120,7 +120,7 @@ export function createMessageHandler({
       stage = 'download';
       downloadTimer = setTimeout(() => {
         downloadTimedOut = true;
-        controller.abort();
+        controller.abort('download_deadline');
       }, downloadTimeoutMs);
       const mediaStream = await downloadMediaMessage(msg, 'stream', { options: { signal } }, {
         logger: privateLogger, reuploadRequest: sock.updateMediaMessage
@@ -144,7 +144,10 @@ export function createMessageHandler({
         const result = await processImage(input, dir, imageFormat, signal);
         ({ path: output, mimetype, metrics } = result);
       } else {
-        metrics = await repackVideo(input, output, { statusVideo: true, signal });
+        metrics = await repackVideo(input, output, {
+          statusVideo: true, signal,
+          onProgress: fields => log.info?.(fields, 'FFmpeg progress')
+        });
       }
       log.info?.({ ...metrics, kind: image ? 'image' : 'video', elapsedMs: Date.now() - started }, 'Media processing completed');
       stage = 'upload';
@@ -251,7 +254,7 @@ export function createMessageHandler({
       accepted.delete(job.key);
       job.done();
     }
-    for (const controller of active.keys()) controller.abort();
+    for (const controller of active.keys()) controller.abort('shutdown');
     await Promise.all(active.values());
   };
   return handleMessages;

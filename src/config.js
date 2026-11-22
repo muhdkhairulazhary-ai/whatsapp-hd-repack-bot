@@ -25,7 +25,7 @@ export const config = {
   maxInputBytes: number('MAX_INPUT_BYTES', 16 * 1024 * 1024, 1024, 100 * 1024 * 1024),
   maxOutputBytes: number('MAX_OUTPUT_BYTES', 16 * 1024 * 1024, 1024, 100 * 1024 * 1024),
   maxVideoSeconds: number('MAX_VIDEO_SECONDS', 300, 1, 3600),
-  ffmpegTimeoutMs: number('FFMPEG_TIMEOUT_MS', 180000, 1000, 600000),
+  ffmpegTimeoutMs: number('FFMPEG_TIMEOUT_MS', 600_000, 1000, 600_000),
   videoMaxWidth: number('VIDEO_MAX_WIDTH', 1280, 320, 3840),
   videoCrf: number('VIDEO_CRF', 28, 18, 35),
   videoMaxrate: process.env.VIDEO_MAXRATE || '1800k',

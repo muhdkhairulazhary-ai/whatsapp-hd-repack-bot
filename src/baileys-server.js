@@ -10,6 +10,7 @@ import { branding } from './shelby-commands.js';
 import { createMessageHandler } from './baileys-media.js';
 import { createConnectionManager } from './baileys-connection.js';
 import { createBaileysDiagnosticLogger, pairingBrowser, requestConfirmedPairingCode } from './baileys-pairing.js';
+import { createRemoteAuthLoader } from './baileys-remote-auth.js';
 import { createBaileysHandler } from './baileys-http.js';
 
 const log = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -24,14 +25,16 @@ process.umask(0o077);
 const accounts = createAccountStore(process.env.BOT_ACCOUNTS_DIR || './shelby-accounts');
 const onMessages = createMessageHandler({ downloadMediaMessage, log, privateLogger, accounts });
 
+const loadRemoteAuth = createRemoteAuthLoader({ authDir });
+
 const connection = createConnectionManager({
   phone: pairingToken && /^[1-9][0-9]{5,14}$/.test(phone) ? phone : '',
   reasons: DisconnectReason,
   log,
-  async loadAuth() {
+  loadAuth: loadRemoteAuth || (async () => {
     await mkdir(authDir, { recursive: true, mode: 0o700 });
     return useMultiFileAuthState(authDir);
-  },
+  }),
   requestPairingCode: requestConfirmedPairingCode,
   makeSocket: (auth, onNotificationError) => makeWASocket({
     auth,
