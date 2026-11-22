@@ -40,28 +40,49 @@ let busy = false;
 async function start() {
   await mkdir(authDir, { recursive: true, mode: 0o700 });
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
-  const sock = makeWASocket({ auth: state, logger: log, printQRInTerminal: false });
+  const sock = makeWASocket({
+    auth: state,
+    logger: log,
+    printQRInTerminal: false,
+    connectTimeoutMs: 60000,
+    keepAliveIntervalMs: 30000,
+  });
   let socketClosed = false;
+  let pairingTimer = null;
   sock.ev.on('creds.update', saveCreds);
   let pairingRequested = false;
   sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
-    if (!state.creds.registered && phone && pairingToken && !pairingRequested && connection === 'connecting') {
+    if (!state.creds.registered && phone && pairingToken && !pairingRequested && (connection === 'connecting')) {
       pairingRequested = true;
-      setTimeout(async () => {
-        if (socketClosed || sock.ws?.readyState !== 1) { pairingRequested = false; return; }
+      pairingTimer = setTimeout(async () => {
+        pairingTimer = null;
+        if (socketClosed || sock.ws?.readyState !== 1) {
+          log.warn('Pairing skipped: socket closed before request');
+          return;
+        }
         try {
           const code = await sock.requestPairingCode(phone);
-          if (!socketClosed) { pairingCode = code; pairingExpires = Date.now() + 120000; log.info('Pairing code available via authenticated endpoint'); }
-        } catch (err) { pairingRequested = false; log.warn({ message: err?.message }, 'Pairing request unsuccessful'); }
-      }, 2500);
+          if (!socketClosed) {
+            pairingCode = code;
+            pairingExpires = Date.now() + 120000;
+            log.info('Pairing code available via authenticated endpoint');
+          }
+        } catch (err) {
+          log.warn({ message: err?.message, statusCode: err?.output?.statusCode }, 'Pairing request unsuccessful');
+        }
+      }, 5000);
     }
     if (connection === 'open') { connected = true; pairingCode = null; log.info('WhatsApp linked'); }
     if (connection === 'close') {
       socketClosed = true;
+      if (pairingTimer) clearTimeout(pairingTimer);
       pairingCode = null;
       connected = false;
       const status = lastDisconnect?.error?.output?.statusCode;
-      if (status !== DisconnectReason.loggedOut) setTimeout(start, 5000);
+      log.warn({ statusCode: status, reason: lastDisconnect?.error?.message }, 'WhatsApp connection closed');
+      if (status !== DisconnectReason.loggedOut) setTimeout(() => {
+        start().catch(err => log.error({ err }, 'Reconnect failed'));
+      }, 10000);
       else log.error('Logged out: remove stale auth and pair again');
     }
   });
