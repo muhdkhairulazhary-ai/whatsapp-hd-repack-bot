@@ -201,3 +201,78 @@ test('download, timeout, memory, FFmpeg and upload failures are distinct and pri
   assert.doesNotMatch(JSON.stringify(errors), /private|wa-errors-test/);
   assert.deepEqual((await readdir(tempRoot)).sort(), ['bin', 'source.mp4']);
 });
+
+test('compatible 1080×1920 60 fps MP4 is copied packet-for-packet and logged safely', async t => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'wa-copy-test-'));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  const fixture = path.join(tempRoot, 'source.mp4');
+  await run('ffmpeg', ['-hide_banner', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', 'testsrc2=size=1080x1920:rate=60',
+    '-f', 'lavfi', '-i', 'sine=frequency=1000', '-t', '0.25',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-threads:v', '2', '-c:a', 'aac', fixture]);
+  async function packetHashes(file, stream) {
+    const { stdout } = await run('ffprobe', ['-v', 'error', '-select_streams', stream, '-show_packets',
+      '-show_entries', 'packet=data_hash', '-show_data_hash', 'sha256', '-of', 'json', file]);
+    return JSON.parse(stdout).packets.map(packet => packet.data_hash);
+  }
+
+  const original = await readFile(fixture);
+  const logs = [];
+  const errors = [];
+  const sock = { async sendMessage(jid, message) {
+    if (!message.video) return;
+    for (const stream of ['v:0', 'a:0']) {
+      assert.deepEqual(await packetHashes(message.video.url, stream), await packetHashes(fixture, stream));
+    }
+  } };
+  const handler = createMessageHandler({
+    tempRoot, log: { info: fields => logs.push(fields), error: fields => errors.push(fields) },
+    downloadMediaMessage: async () => Readable.from([original])
+  });
+  await handler(sock, videoEvent('private-message-id'));
+  assert.deepEqual(errors, []);
+  assert.equal(logs.length, 1);
+  const [metrics] = logs;
+  assert.equal(metrics.videoMode, 'copy');
+  assert.equal(metrics.audioMode, 'copy');
+  for (const media of [metrics.input, metrics.output]) {
+    assert.equal(media.width, 1080);
+    assert.equal(media.height, 1920);
+    assert.equal(media.fps, '60/1');
+    assert.ok(media.bitrateBps > 0);
+  }
+  assert.equal(metrics.input.bytes, original.length);
+  assert.ok(Math.abs(metrics.output.bytes - original.length) < 2048);
+  assert.doesNotMatch(JSON.stringify(logs), /source\.mp4|private-message|wa-copy-test/);
+});
+
+test('1080×1920 HEVC conversion keeps frame rate and rejects over-limit output without retrying at lower quality', async t => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'wa-hd-test-'));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  const fixture = path.join(tempRoot, 'source.mov');
+  await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1080x1920:rate=48',
+    '-t', '0.25', '-c:v', 'libx265', '-preset', 'ultrafast', '-threads:v', '1',
+    '-x265-params', 'pools=none:frame-threads=1:log-level=error', '-tag:v', 'hvc1', fixture]);
+  const original = await readFile(fixture);
+  const logs = [];
+  const errors = [];
+  const sent = [];
+  const handler = createMessageHandler({
+    tempRoot, maxOutputBytes: 1,
+    log: { info: fields => logs.push(fields), error: fields => errors.push(fields) },
+    downloadMediaMessage: async () => Readable.from([original])
+  });
+  await handler({ sendMessage: async (jid, message) => sent.push(message) }, videoEvent('too-big-output'));
+
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].videoMode, 'encode');
+  assert.equal(logs[0].input.videoCodec, 'hevc');
+  assert.equal(logs[0].output.videoCodec, 'h264');
+  assert.equal(logs[0].output.width, 1080);
+  assert.equal(logs[0].output.height, 1920);
+  assert.equal(logs[0].output.fps, '48/1');
+  assert.equal(errors[0].stage, 'upload');
+  assert.equal(errors[0].reason, 'output_limit');
+  assert.equal(sent.some(message => message.video), false);
+  assert.match(sent.at(-1).text, /had penghantaran/);
+});

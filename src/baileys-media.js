@@ -17,6 +17,7 @@ const userMessages = {
   disk_full: 'Storan sementara penuh. Sila cuba lagi kemudian.',
   download: 'Video gagal dimuat turun. Sila hantar semula video.',
   upload: 'Video siap diproses tetapi gagal dihantar. Sila cuba lagi.',
+  upload_size_rejected: 'WhatsApp menolak saiz video yang diproses. Sila cuba klip yang lebih pendek.',
   output_limit: 'Video yang diproses masih terlalu besar untuk dihantar. Sila cuba klip yang lebih pendek.'
 };
 
@@ -24,6 +25,7 @@ function failureDetails(error, stage, downloadTimedOut) {
   if (error instanceof VideoError) return { stage: error.stage, reason: error.reason, ...error.details };
   let reason = 'operation_failed';
   if ((stage === 'download' && downloadTimedOut) || ['ETIMEDOUT', 'ECONNABORTED'].includes(error?.code)) reason = 'timeout';
+  if (stage === 'upload' && (error?.response?.status === 413 || error?.output?.statusCode === 413)) reason = 'upload_size_rejected';
   if (error?.code === 'ENOMEM') reason = 'memory_exhausted';
   if (error?.code === 'ENOSPC') reason = 'disk_full';
   const statusCode = error?.response?.status ?? error?.output?.statusCode;
@@ -32,6 +34,7 @@ function failureDetails(error, stage, downloadTimedOut) {
 
 function replyFor({ stage, reason, limitBytes, limitSeconds }) {
   if (reason === 'input_limit') return `Fail terlalu besar. Had saiz ialah ${limitBytes / 1_000_000} MB.`;
+  if (reason === 'output_limit' && limitBytes) return `Video siap diproses tetapi melebihi had penghantaran bot (${limitBytes / 1_000_000} MB). Sila cuba klip yang lebih pendek.`;
   if (reason === 'duration_limit') return `Video terlalu panjang. Had tempoh ialah ${limitSeconds} saat.`;
   return userMessages[reason] || userMessages[stage] || 'Video gagal diproses. Sila cuba fail MP4 atau MOV yang lebih pendek.';
 }
@@ -39,10 +42,14 @@ function replyFor({ stage, reason, limitBytes, limitSeconds }) {
 export function createMessageHandler({
   downloadMediaMessage, log, privateLogger, tempRoot = os.tmpdir(),
   maxBytes = Number(process.env.BAILEYS_MAX_INPUT_BYTES ?? MAX_STATUS_INPUT_BYTES),
+  maxOutputBytes = Number(process.env.BAILEYS_MAX_OUTPUT_BYTES ?? MAX_STATUS_INPUT_BYTES),
   downloadTimeoutMs = DOWNLOAD_TIMEOUT_MS
 }) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_STATUS_INPUT_BYTES) {
     throw new Error('BAILEYS_MAX_INPUT_BYTES must be an integer between 1 and 150000000.');
+  }
+  if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0 || maxOutputBytes > MAX_STATUS_INPUT_BYTES) {
+    throw new Error('BAILEYS_MAX_OUTPUT_BYTES must be an integer between 1 and 150000000.');
   }
   const seen = new Set();
   let busy = false;
@@ -88,8 +95,14 @@ export function createMessageHandler({
 
       clearTimeout(downloadTimer);
       stage = 'ffmpeg';
-      await repackVideo(input, output, { statusVideo: true });
+      const metrics = await repackVideo(input, output, { statusVideo: true });
+      log.info?.(metrics, 'Video processing completed');
       stage = 'upload';
+      if (metrics.output.bytes > maxOutputBytes) {
+        throw new VideoError(stage, 'output_limit', 'Output exceeds the upload size limit.', {
+          outputBytes: metrics.output.bytes, limitBytes: maxOutputBytes
+        });
+      }
       await sock.sendMessage(jid, {
         video: { url: output }, mimetype: 'video/mp4', caption: '✅ Video siap untuk diuji di WhatsApp Status.'
       }, { mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS });
