@@ -119,7 +119,7 @@ test('authenticated POST starts one socket and requests one code after the chall
   assert.equal(sock.requests, 1);
   assert.equal(http().result.code, code);
   assert.equal(http().headers['cache-control'], 'no-store');
-  assert.equal(http('/health').result.whatsappConnected, false);
+  assert.equal(manager.connected, false);
   assert.equal(http('/pairing', 'Bearer wrong').result.code, undefined);
   assert.deepEqual(stored(), { me: { id: phone }, pairingCode: code });
   for (const secret of [phone, code, token, 'private-challenge']) assert.doesNotMatch(logs.join(), new RegExp(secret));
@@ -208,7 +208,7 @@ test('persists signed credentials before the required restart and gates messages
   assert.equal(messages.length, 0);
   sockets[1].ev.emit('connection.update', { connection: 'open' });
   assert.equal(http().result.status, 'already_linked');
-  assert.equal(http('/health').result.whatsappConnected, true);
+  assert.equal(manager.connected, true);
   sockets[1].ev.emit('messages.upsert', { messages: [] });
   assert.equal(messages.length, 1);
   disconnect(sockets[1], 440);
