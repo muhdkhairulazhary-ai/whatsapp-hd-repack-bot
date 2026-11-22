@@ -48,9 +48,13 @@ function buildStatusArgs(inputPath, outputPath, { duration, video, audio }) {
   };
 }
 
-function runTool(command, args, { stage, timeoutMs, captureOutput = false }) {
+export function runTool(command, args, { stage, timeoutMs, captureOutput = false, signal, env = process.env }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', captureOutput ? 'pipe' : 'ignore', 'pipe'] });
+    if (signal?.aborted) {
+      reject(new VideoError(stage, 'timeout', 'Media processing was stopped.'));
+      return;
+    }
+    const child = spawn(command, args, { env, stdio: ['ignore', captureOutput ? 'pipe' : 'ignore', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let memoryFailure = false;
@@ -58,10 +62,12 @@ function runTool(command, args, { stage, timeoutMs, captureOutput = false }) {
     let unsupportedCodec = false;
     let timedOut = false;
     let spawnError;
-    const timer = setTimeout(() => {
+    const stop = () => {
       timedOut = true;
       child.kill('SIGKILL');
-    }, timeoutMs);
+    };
+    const timer = setTimeout(stop, timeoutMs);
+    signal?.addEventListener('abort', stop, { once: true });
 
     child.stdout?.on('data', chunk => { stdout = (stdout + chunk).slice(0, 32768); });
     child.stderr.on('data', chunk => {
@@ -71,9 +77,10 @@ function runTool(command, args, { stage, timeoutMs, captureOutput = false }) {
       unsupportedCodec ||= /decoder .*not found|unknown decoder|unsupported codec/i.test(stderr);
     });
     child.once('error', error => { spawnError = error; });
-    child.once('close', (exitCode, signal) => {
+    child.once('close', (exitCode, exitSignal) => {
       clearTimeout(timer);
-      const details = { exitCode, signal };
+      signal?.removeEventListener('abort', stop);
+      const details = { exitCode, signal: exitSignal };
       if (timedOut) {
         reject(new VideoError(stage, 'timeout', `${command} timed out.`, details));
       } else if (memoryFailure || spawnError?.code === 'ENOMEM') {
@@ -82,10 +89,11 @@ function runTool(command, args, { stage, timeoutMs, captureOutput = false }) {
         reject(new VideoError(stage, 'disk_full', 'Temporary storage is full.', details));
       } else if (spawnError) {
         reject(new VideoError(stage, 'tool_start_failed', `${command} could not start.`, details));
-      } else if (signal) {
+      } else if (exitSignal) {
         reject(new VideoError(stage, 'tool_terminated', `${command} was terminated.`, details));
       } else if (exitCode !== 0) {
-        const reason = stage === 'validation' || unsupportedCodec ? 'unsupported_video' : 'encode_failed';
+        const reason = stage === 'image' ? 'image_conversion_failed'
+          : stage === 'validation' || unsupportedCodec ? 'unsupported_video' : 'encode_failed';
         reject(new VideoError(stage, reason, `${command} failed with exit code ${exitCode}.`, details));
       } else {
         resolve(stdout);
@@ -94,14 +102,14 @@ function runTool(command, args, { stage, timeoutMs, captureOutput = false }) {
   });
 }
 
-async function probeVideo(inputPath, statusVideo) {
+async function probeVideo(inputPath, statusVideo, signal) {
   const entries = statusVideo
     ? 'format=duration,bit_rate:format_tags=major_brand:stream=codec_type,codec_name,profile,pix_fmt,width,height,avg_frame_rate,r_frame_rate,bit_rate,channels:stream_disposition=attached_pic:stream_side_data=rotation'
     : 'format=duration';
   const output = await runTool('ffprobe', [
     '-v', 'error', ...(statusVideo ? ['-protocol_whitelist', 'file', '-f', 'mov'] : []),
     '-show_entries', entries, '-of', 'json', inputPath
-  ], { stage: 'validation', timeoutMs: 15_000, captureOutput: true });
+  ], { stage: 'validation', timeoutMs: 15_000, captureOutput: true, signal });
   let metadata;
   try {
     metadata = JSON.parse(output);
@@ -135,8 +143,8 @@ function mediaMetrics({ duration, video, audio, bitRate }, bytes) {
   };
 }
 
-export async function repackVideo(inputPath, outputPath, { statusVideo = false } = {}) {
-  const input = await probeVideo(inputPath, statusVideo);
+export async function repackVideo(inputPath, outputPath, { statusVideo = false, signal } = {}) {
+  const input = await probeVideo(inputPath, statusVideo, signal);
   const maxSeconds = statusVideo ? Math.min(config.maxVideoSeconds, 60) : config.maxVideoSeconds;
   if (input.duration > maxSeconds) {
     throw new VideoError('validation', 'duration_limit', `This video is longer than the ${maxSeconds}-second limit.`, {
@@ -147,12 +155,12 @@ export async function repackVideo(inputPath, outputPath, { statusVideo = false }
   const { args, videoMode, audioMode } = statusVideo
     ? buildStatusArgs(inputPath, outputPath, input)
     : { args: buildFfmpegArgs(inputPath, outputPath) };
-  await runTool('ffmpeg', args, { stage: 'ffmpeg', timeoutMs: config.ffmpegTimeoutMs });
+  await runTool('ffmpeg', args, { stage: 'ffmpeg', timeoutMs: config.ffmpegTimeoutMs, signal });
 
   const output = await stat(outputPath);
   if (!output.size) throw new VideoError('ffmpeg', 'empty_output', 'FFmpeg produced an empty output file.');
   if (statusVideo) {
-    const metadata = await probeVideo(outputPath, true);
+    const metadata = await probeVideo(outputPath, true, signal);
     return {
       videoMode, audioMode,
       input: mediaMetrics(input, (await stat(inputPath)).size),

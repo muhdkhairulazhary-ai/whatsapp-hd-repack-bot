@@ -18,3 +18,5 @@ README.md
 **/device-list-*.json
 **/tctoken-*.json
 **/identity-key-*.json
+
+/shelby-accounts

@@ -67,7 +67,7 @@ export async function sendVideo(to, mediaId) {
   const response = await graphRequest(`${graphRoot()}/${config.phoneNumberId}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'video', video: { id: mediaId, caption: '✅ Your video is ready (MP4 / H.264 / AAC).' } })
+    body: JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'video', video: { id: mediaId } })
   });
   return response.json();
 }

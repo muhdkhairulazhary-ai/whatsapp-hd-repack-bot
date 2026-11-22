@@ -1,4 +1,4 @@
-# WhatsApp HD Repack Bot
+# Shelby+ HD Status Bot
 
 A Node.js WhatsApp Business Cloud API webhook that receives a video, securely downloads it from Meta, repacks it with FFmpeg, then sends the MP4 back to the same sender.
 
@@ -6,7 +6,7 @@ A Node.js WhatsApp Business Cloud API webhook that receives a video, securely do
 
 The webhook described in this README uses the official Meta WhatsApp Cloud API.
 
-For the feature branch that uses WhatsApp Linked Devices, see [Baileys deployment and iPhone pairing](BAILEYS.md).
+For Shelby+ on the feature branch that uses WhatsApp Linked Devices, see [Baileys deployment and iPhone pairing](BAILEYS.md).
 
 ## Features
 

@@ -4,7 +4,7 @@ const CODE_TTL_MS = 60_000;
 const CONNECT_DEADLINE_MS = 60_000;
 const PHONE_NOTIFICATION_EVENT = 'CB:notification,type:link_code_companion_reg';
 const SIGNED_PAIR_EVENT = 'CB:iq,,pair-success';
-const RETRY_DELAYS_MS = [1_000, 3_000, 10_000];
+const MAX_RETRIES = 3;
 
 export function createConnectionManager({ loadAuth, makeSocket, requestPairingCode, reasons, phone, log, onMessages,
   now = Date.now, schedule = setTimeout, cancel = clearTimeout }) {
@@ -149,8 +149,8 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         }
         if (!state.creds.account && waitForManualRetry) return;
         if (openedAt !== undefined && now() - openedAt >= 60_000) retries = 0;
-        if (retries >= RETRY_DELAYS_MS.length) return;
-        const delay = RETRY_DELAYS_MS[retries++];
+        if (retries >= MAX_RETRIES) return;
+        const delay = 1_000 * (2 ** retries++);
         report('connecting', reason, statusCode);
         retryTimer = schedule(() => {
           retryTimer = undefined;
@@ -163,12 +163,15 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         if (connection === 'close') {
           const error = lastDisconnect?.error;
           let reason = transportOpened ? 'socket_closed' : 'transport_failed';
-          if (error?.message === 'QR refs attempts ended') reason = 'qr_refs_exhausted';
-          if (signedPairReceived && !state.creds.account) reason = 'pairing_signed_response_failed';
+          const statusCode = error?.output?.statusCode;
+          if (statusCode === reasons.loggedOut) reason = 'logged_out';
+          else if (statusCode === reasons.connectionReplaced) reason = 'connection_replaced';
+          else if (error?.message === 'QR refs attempts ended') reason = 'qr_refs_exhausted';
+          if (!terminal.has(statusCode) && signedPairReceived && !state.creds.account) reason = 'pairing_signed_response_failed';
           else if (phoneConfirmationReceived && !state.creds.account && reason === 'socket_closed') {
             reason = finishAccepted ? 'pairing_closed_after_finish' : 'pairing_closed_during_finish';
           }
-          return close(reason, error?.output?.statusCode, true);
+          return close(reason, statusCode, true);
         }
         if (connection === 'open') {
           cancel(deadline);

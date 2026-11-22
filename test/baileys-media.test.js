@@ -23,7 +23,9 @@ test('Baileys video handler streams, repacks, replies and cleans up', async t =>
   const input = await readFile(fixture);
   const sent = [];
   const errors = [];
+  const recorded = [];
   const handler = createMessageHandler({
+    accounts: { async record(jid, kind) { recorded.push([jid, kind]); } },
     maxBytes: input.length,
     tempRoot,
     log: { error: message => errors.push(message) },
@@ -43,9 +45,10 @@ test('Baileys video handler streams, repacks, replies and cleans up', async t =>
     return { type: 'notify', messages: [{ key: { remoteJid: 'test@s.whatsapp.net', id }, message: media }] };
   }
 
-  await handler(sock, event('video', { videoMessage: {} }));
+  await handler(sock, event('video', { videoMessage: { caption: 'private original caption' } }));
   assert.deepEqual((await readdir(tempRoot)).sort(), ['source.mov', 'reply.mp4'].sort());
   const [reply] = sent.filter(message => message.video);
+  assert.equal(Object.hasOwn(reply, 'caption'), false);
   assert.equal(reply.mimetype, 'video/mp4');
   assert.equal(reply.jid, 'test@s.whatsapp.net');
   const { stdout } = await run('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,pix_fmt', '-of', 'json', output]);
@@ -54,6 +57,7 @@ test('Baileys video handler streams, repacks, replies and cleans up', async t =>
   await handler(sock, event('oversize', { documentMessage: { mimetype: 'video/quicktime' } }));
   await handler(sock, event('invalid', { videoMessage: {} }));
   assert.equal(errors.length, 2);
+  assert.deepEqual(recorded, [['test@s.whatsapp.net', 'video']]);
   assert.equal(sent.filter(message => message.text?.startsWith('❌')).length, 2);
   assert.equal(sent.filter(message => message.video).length, 1);
   assert.deepEqual((await readdir(tempRoot)).sort(), ['reply.mp4', 'source.mov']);
