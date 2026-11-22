@@ -19,6 +19,7 @@ const userMessages = {
   image_conversion_failed: 'Gambar gagal diproses. Fail mungkin rosak atau format ini tidak disokong.',
   image_pixel_limit: 'Resolusi gambar melebihi had 50 megapiksel.',
   image: 'Gambar gagal diproses. Cuba hantar fail JPEG, PNG atau HEIC lain.',
+  size_quality_limit: 'Video ini tidak boleh dimuatkan dalam had saiz dengan kualiti yang sesuai. Sila potong video kepada klip yang lebih pendek.',
   output_invalid: 'Video yang diproses tidak serasi. Sila cuba fail MP4 atau MOV lain.',
   unsupported_video: 'Format video tidak disokong atau fail rosak. Sila hantar fail MP4 atau MOV.',
   timeout: 'Masa pemprosesan tamat. Sila cuba video yang lebih kecil atau pendek.',
@@ -158,7 +159,8 @@ export function createMessageHandler({
         ({ path: output, mimetype, metrics } = result);
       } else {
         metrics = await repackVideo(input, output, {
-          statusVideo: true, signal, onStage: timing, inputBytes: bytes, readMemory,
+          statusVideo: true, signal, onStage: timing, inputBytes: bytes, readMemory, maxOutputBytes,
+          onSizePlan: fields => log.info?.(fields, 'HEVC output size budget'),
           onProgress: fields => log.info?.(fields, 'FFmpeg progress')
         });
       }

@@ -253,7 +253,7 @@ test('compatible 1080×1920 60 fps MP4 is copied packet-for-packet and logged sa
   assert.doesNotMatch(JSON.stringify(logs), /source\.mp4|private-message|wa-copy-test/);
 });
 
-test('1080×1920 HEVC conversion keeps frame rate and rejects over-limit output without retrying at lower quality', async t => {
+test('1080×1920 HEVC conversion keeps frame rate and rejects an impossible size budget', async t => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'wa-hd-test-'));
   t.after(() => rm(tempRoot, { recursive: true, force: true }));
   const fixture = path.join(tempRoot, 'source.mov');
@@ -265,7 +265,7 @@ test('1080×1920 HEVC conversion keeps frame rate and rejects over-limit output 
   const errors = [];
   const sent = [];
   const handler = createMessageHandler({
-    tempRoot, maxOutputBytes: 1,
+    tempRoot,
     log: { info: fields => { if (fields.input) logs.push(fields); }, error: fields => errors.push(fields) },
     downloadMediaMessage: async () => Readable.from([original])
   });
@@ -278,10 +278,16 @@ test('1080×1920 HEVC conversion keeps frame rate and rejects over-limit output 
   assert.equal(logs[0].output.width, 1080);
   assert.equal(logs[0].output.height, 1920);
   assert.equal(logs[0].output.fps, '48/1');
-  assert.equal(errors[0].stage, 'upload');
-  assert.equal(errors[0].reason, 'output_limit');
-  assert.equal(sent.some(message => message.video), false);
-  assert.match(sent.at(-1).text, /had penghantaran/);
+  assert.deepEqual(errors, []);
+  assert.equal(sent.some(message => message.video), true);
+  const tinyBudget = createMessageHandler({
+    tempRoot, maxOutputBytes: 1, log: { error: fields => errors.push(fields) },
+    downloadMediaMessage: async () => Readable.from([original])
+  });
+  await tinyBudget({ sendMessage: async (jid, message) => sent.push(message) }, videoEvent('impossible-budget'));
+  assert.equal(errors[0].reason, 'size_quality_limit');
+  assert.equal(sent.filter(message => message.video).length, 1);
+  assert.match(sent.at(-1).text, /kualiti yang sesuai/);
 });
 
 test('FFmpeg progress only reports numeric metrics and distinguishes job deadlines and crashes', async () => {

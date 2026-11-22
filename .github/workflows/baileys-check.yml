@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
       - name: Check syntax
-        run: for file in src/*.js test/*.js; do node --check "$file" || exit; done
+        run: for file in src/*.js test/*.js scripts/*.js; do node --check "$file" || exit; done
       - name: Install media tools
         run: sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick libheif-plugin-libde265 redis-server
       - name: Run tests
@@ -27,4 +27,6 @@ jobs:
       - name: Build Docker image
         run: docker build -t whatsapp-hd-baileys:test .
       - name: Test media processing in the 512 MiB Docker image
-        run: docker run --rm --memory=512m --memory-swap=512m whatsapp-hd-baileys:test node --test --test-concurrency=1 test/baileys-media.test.js test/shelby.test.js
+        run: docker run --rm --memory=512m --memory-swap=512m whatsapp-hd-baileys:test node --test --test-concurrency=1 test/baileys-media.test.js test/shelby.test.js test/video-size.test.js
+      - name: Benchmark video size control in the 512 MiB Docker image
+        run: docker run --rm --cpus=1 --memory=512m --memory-swap=512m whatsapp-hd-baileys:test node scripts/benchmark-video-size.js

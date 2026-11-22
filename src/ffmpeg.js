@@ -1,5 +1,7 @@
+import { performance } from 'node:perf_hooks';
 import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
+import { planHevcSize } from './video-size.js';
 import { config } from './config.js';
 import { HIGH_RES_TRANSCODE_HEADROOM, mediaMemoryLimit, memorySnapshot, timeStage } from './runtime-diagnostics.js';
 
@@ -50,7 +52,7 @@ function compatibleAudio(audio) {
   return audio?.codec_name === 'aac' && audio.profile === 'LC' && [1, 2].includes(audio.channels);
 }
 
-function buildStatusArgs(inputPath, outputPath, { duration, video, audio }, fallback = false) {
+function buildStatusArgs(inputPath, outputPath, { duration, video, audio }, fallback = false, sizePlan) {
   const copyVideo = !fallback && compatibleVideo(video);
   const copyAudio = !fallback && compatibleAudio(audio);
   const hevc = video.codec_name === 'hevc';
@@ -67,6 +69,7 @@ function buildStatusArgs(inputPath, outputPath, { duration, video, audio }, fall
       '-map', '0:V:0', '-map', audio ? '0:a:0' : '1:a:0',
       ...(copyVideo ? ['-c:v', 'copy'] : [
         '-c:v', 'libx264', '-preset', hevc ? 'ultrafast' : 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
+        ...(sizePlan ? ['-maxrate:v', `${sizePlan.videoKbps}k`, '-bufsize:v', `${sizePlan.bufferKbits}k`] : []),
         ...(oddSize ? ['-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2'] : []),
         '-fps_mode:v', 'passthrough', '-enc_time_base:v', '-1',
         '-threads:v', '1', '-x264-params', hevc ? 'rc-lookahead=0:sync-lookahead=0' : 'rc-lookahead=8:sync-lookahead=0'
@@ -240,7 +243,7 @@ function verifyStatusVideo(input, output, preserveMatrix) {
 }
 
 export async function repackVideo(inputPath, outputPath, {
-  statusVideo = false, signal, onProgress, onStage, inputBytes, readMemory = memorySnapshot
+  statusVideo = false, signal, onProgress, onStage, inputBytes, readMemory = memorySnapshot, maxOutputBytes, onSizePlan
 } = {}) {
   const input = await timeStage('ffprobe', onStage, () => probeVideo(inputPath, statusVideo, signal));
   const maxSeconds = statusVideo ? Math.min(config.maxVideoSeconds, 60) : config.maxVideoSeconds;
@@ -250,15 +253,37 @@ export async function repackVideo(inputPath, outputPath, {
     });
   }
 
+  let encodingMs = 0;
   async function convert(args) {
+    const remaining = Math.floor(config.ffmpegTimeoutMs - encodingMs);
+    if (remaining <= 0) throw new VideoError('ffmpeg', 'timeout', 'Encoder time budget exhausted.', { stopSource: 'ffmpeg_deadline' });
+    const started = performance.now();
     const ffmpegArgs = onProgress ? ['-progress', 'pipe:3', '-stats_period', '15', '-nostats', ...args] : args;
-    await timeStage('ffmpeg', onStage, () =>
-      runTool('ffmpeg', ffmpegArgs, { stage: 'ffmpeg', timeoutMs: config.ffmpegTimeoutMs, signal, onProgress }));
+    try {
+      await timeStage('ffmpeg', onStage, () =>
+        runTool('ffmpeg', ffmpegArgs, { stage: 'ffmpeg', timeoutMs: remaining, signal, onProgress }));
+    } finally {
+      encodingMs += performance.now() - started;
+    }
   }
 
   if (statusVideo) {
-    async function produce(fallback) {
-      const { args, videoMode, audioMode } = buildStatusArgs(inputPath, outputPath, input, fallback);
+    const budget = input.video.codec_name === 'hevc' && maxOutputBytes !== undefined
+      ? { ...input, maxBytes: maxOutputBytes } : null;
+    if (budget && (input.video.width % 2 || input.video.height % 2)) {
+      throw new VideoError('validation', 'unsupported_video', 'HEVC dimensions must be even to preserve geometry without padding.');
+    }
+    let sizePlan;
+    function checkCancellation() {
+      if (signal?.aborted) {
+        const source = abortSource(signal);
+        throw new VideoError('ffmpeg', source === 'job_deadline' ? 'timeout' : source, 'Media processing was stopped.', { stopSource: source });
+      }
+    }
+    async function produce(fallback, retryKbps) {
+      checkCancellation();
+      const { videoMode, audioMode } = buildStatusArgs(inputPath, outputPath, input, fallback);
+
       // The single-threaded UHD HEVC benchmark alone reached 583 MiB.
       // Check immediately before encoding, including after a failed remux.
       if (videoMode === 'encode' && input.video.width * input.video.height > 1920 * 1080) {
@@ -273,9 +298,24 @@ export async function repackVideo(inputPath, outputPath, {
           });
         }
       }
+      if (budget) {
+        sizePlan = planHevcSize(budget, retryKbps);
+        if (sizePlan.videoKbps < sizePlan.minimumKbps) {
+          throw new VideoError('validation', 'size_quality_limit', 'The size budget is too low for this frame size and rate.', {
+            limitBytes: maxOutputBytes, minimumVideoKbps: sizePlan.minimumKbps
+          });
+        }
+        onSizePlan?.(sizePlan);
+      }
+      const { args } = buildStatusArgs(inputPath, outputPath, input, fallback, sizePlan);
       await convert(args);
       return timeStage('verification', onStage, async () => {
         const output = await stat(outputPath);
+        if (budget && output.size > maxOutputBytes) {
+          throw new VideoError('verification', 'output_limit', 'Output exceeds the upload size limit.', {
+            outputBytes: output.size, limitBytes: maxOutputBytes
+          });
+        }
         if (!output.size) throw new VideoError('verification', 'output_invalid', 'Empty output.');
         const metadata = await probeVideo(outputPath, true, signal, 'verification');
         verifyStatusVideo(input, metadata, !fallback && standardRotation(input.video));
@@ -289,11 +329,20 @@ export async function repackVideo(inputPath, outputPath, {
     try {
       return await produce(false);
     } catch (error) {
+      checkCancellation();
+      if (budget && error.reason === 'output_limit') {
+        const lowerKbps = Math.floor(sizePlan.videoKbps *
+          Math.min(0.85, 0.90 * maxOutputBytes / error.details.outputBytes));
+        if (lowerKbps < sizePlan.minimumKbps) {
+          throw new VideoError('verification', 'size_quality_limit', 'Cannot retry without crossing the quality floor.', error.details);
+        }
+        return produce(false, lowerKbps);
+      }
       // Retry only when a copied track or preserved rotation could be at fault.
       const videoCopy = compatibleVideo(input.video);
       const canRepair = error.reason === 'encode_failed' ? videoCopy :
         error.reason === 'output_invalid' && (videoCopy || compatibleAudio(input.audio) || rotation(input.video));
-      if (signal?.aborted || !canRepair) throw error;
+      if (!canRepair) throw error;
       return produce(true);
     }
   }
