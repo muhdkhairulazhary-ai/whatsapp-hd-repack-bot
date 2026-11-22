@@ -17,7 +17,20 @@ const maxBytes = Number(process.env.MAX_INPUT_BYTES || 16 * 1024 * 1024);
 const seen = new Set();
 const port = Number(process.env.PORT || 3000);
 let connected = false;
+let pairingCode = null;
+let pairingExpires = 0;
+const pairingToken = process.env.PAIRING_ACCESS_TOKEN || '';
 http.createServer((req, res) => {
+  if (req.url === '/pairing' && req.method === 'POST') {
+    res.setHeader('cache-control', 'no-store');
+    const supplied = req.headers.authorization?.replace(/^Bearer /i, '') || '';
+    const a = Buffer.from(supplied), b = Buffer.from(pairingToken);
+    if (!pairingToken || a.length !== b.length || !crypto.timingSafeEqual(a,b)) { res.writeHead(403); return res.end('Forbidden'); }
+    if (!pairingCode || Date.now() > pairingExpires) { res.writeHead(404); return res.end('Pairing code unavailable'); }
+    const code = pairingCode; pairingCode = null;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ code }));
+  }
   if (req.url !== '/health') { res.writeHead(404); return res.end('Not found'); }
   res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
   res.end(JSON.stringify({ ok: true, whatsappConnected: connected }));
@@ -28,19 +41,24 @@ async function start() {
   await mkdir(authDir, { recursive: true, mode: 0o700 });
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const sock = makeWASocket({ auth: state, logger: log, printQRInTerminal: false });
+  let socketClosed = false;
   sock.ev.on('creds.update', saveCreds);
   let pairingRequested = false;
   sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
-    if (!state.creds.registered && phone && !pairingRequested && (connection === 'connecting' || connection === 'open')) {
+    if (!state.creds.registered && phone && pairingToken && !pairingRequested && connection === 'connecting') {
       pairingRequested = true;
-      try {
-        const code = await sock.requestPairingCode(phone);
-        // Pairing codes are credentials: view privately, never publish logs.
-        log.warn({ pairingCode: code }, 'Temporary pairing code; protect your logs');
-      } catch (err) { pairingRequested = false; log.error({ err }, 'Pairing failed'); }
+      setTimeout(async () => {
+        if (socketClosed || sock.ws?.readyState !== 1) { pairingRequested = false; return; }
+        try {
+          const code = await sock.requestPairingCode(phone);
+          if (!socketClosed) { pairingCode = code; pairingExpires = Date.now() + 120000; log.info('Pairing code available via authenticated endpoint'); }
+        } catch (err) { pairingRequested = false; log.warn({ message: err?.message }, 'Pairing request unsuccessful'); }
+      }, 2500);
     }
-    if (connection === 'open') { connected = true; log.info('WhatsApp linked'); }
+    if (connection === 'open') { connected = true; pairingCode = null; log.info('WhatsApp linked'); }
     if (connection === 'close') {
+      socketClosed = true;
+      pairingCode = null;
       connected = false;
       const status = lastDisconnect?.error?.output?.statusCode;
       if (status !== DisconnectReason.loggedOut) setTimeout(start, 5000);
