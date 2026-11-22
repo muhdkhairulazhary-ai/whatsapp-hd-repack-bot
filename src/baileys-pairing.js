@@ -71,7 +71,13 @@ export function getPairingReference(node) {
   return getBinaryNodeChildBuffer(getBinaryNodeChild(node, 'link_code_companion_reg'), 'link_code_pairing_ref');
 }
 
-export function createBaileysDiagnosticLogger(silentLogger, onNotificationError) {
+const RECEIVE_ERRORS = new Map([
+  ['error in handling message', 'message_receive_failed'],
+  ["unexpected error in 'processing offline nodes'", 'offline_message_processing_failed'],
+  ["unexpected error in 'init queries'", 'whatsapp_init_queries_failed']
+]);
+
+export function createBaileysDiagnosticLogger(silentLogger, onNotificationError, onTransportError) {
   // The full Baileys payload, text, stack, and identifiers stay outside app logs.
   const logger = Object.create(silentLogger);
   logger.child = () => logger;
@@ -79,6 +85,8 @@ export function createBaileysDiagnosticLogger(silentLogger, onNotificationError)
     if (message === "unexpected error in 'handling notification'") {
       onNotificationError(protocolErrorCode(fields?.err?.data) ?? protocolErrorCode(fields?.err?.output?.statusCode));
     }
+    const reason = RECEIVE_ERRORS.get(message);
+    if (reason) onTransportError?.(reason, protocolErrorCode((fields?.err ?? fields?.error)?.output?.statusCode));
   };
   return logger;
 }

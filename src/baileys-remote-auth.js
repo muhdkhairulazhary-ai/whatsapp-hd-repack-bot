@@ -37,11 +37,11 @@ function settings(env) {
   return { url: endpoint.href, token, key, session, migrate: env.BAILEYS_AUTH_MIGRATE_LOCAL === '1' };
 }
 
-export function createRemoteAuthLoader({ env = process.env, authDir, fetchImpl = fetch } = {}) {
+export function createRemoteAuthLoader({ env = process.env, authDir, log, fetchImpl = fetch } = {}) {
   const options = settings(env);
   if (!options) return null;
   return () => openRemoteAuth({
-    ...options, authDir,
+    ...options, authDir, log,
     async command(args) {
       try {
         const response = await fetchImpl(options.url, {
@@ -71,7 +71,7 @@ function usableCreds(creds) {
 }
 
 export async function openRemoteAuth({
-  command, key, session, migrate = false, authDir, renewMs = RENEW_MS
+  command, key, session, migrate = false, authDir, log, renewMs = RENEW_MS
 }) {
   const prefix = `shelby:auth:{${session}}`;
   const lease = prefix + ':lease';
@@ -148,8 +148,25 @@ export async function openRemoteAuth({
     await write(records);
   }
 
-  const result = await command(['SET', lease, owner, 'NX', 'PX', LEASE_MS]);
+  async function releaseLease() {
+    try {
+      const released = await command(['EVAL', RELEASE, 1, lease, owner]);
+      if (released === 1) log?.info({ reason: 'auth_lease_released' }, 'Redis auth lease released');
+    } catch {
+      log?.warn?.({ reason: 'auth_lease_release_unconfirmed' }, 'Redis auth lease will expire');
+    }
+  }
+
+  let result;
+  try {
+    result = await command(['SET', lease, owner, 'NX', 'PX', LEASE_MS]);
+  } catch (error) {
+    // The write may have reached Redis even when its response was lost.
+    await releaseLease();
+    throw error;
+  }
   if (result !== 'OK') throw failure('auth_storage_busy');
+  log?.info({ reason: 'auth_lease_acquired' }, 'Redis auth lease acquired');
   try {
     const stored = await command(['HGETALL', hash]);
     if (!stored || typeof stored !== 'object' || (Array.isArray(stored) && stored.length % 2)) {
@@ -252,12 +269,12 @@ export async function openRemoteAuth({
         if (releaseTask) return releaseTask;
         sealed = true;
         clearInterval(timer);
-        releaseTask = tail.then(() => command(['EVAL', RELEASE, 1, lease, owner])).catch(() => {});
+        releaseTask = tail.then(releaseLease);
         return releaseTask;
       }
     };
   } catch (error) {
-    await command(['EVAL', RELEASE, 1, lease, owner]).catch(() => {});
+    await releaseLease();
     throw error;
   }
 }

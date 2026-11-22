@@ -160,3 +160,137 @@ test('connection backs off while storage is unavailable and resumes without requ
   await manager.stop();
   assert.equal(releases, 1);
 });
+
+test('restart waits for the old lease, then delivers commands across Baileys startup buffering', { skip: !hasRedis }, async t => {
+  const { EventEmitter } = await import('node:events');
+  const { DisconnectReason, makeEventBuffer } = await import('@whiskeysockets/baileys');
+  const { default: pino } = await import('pino');
+  const { createMessageHandler } = await import('../src/baileys-media.js');
+  const { command } = await redis(t);
+  const entries = [];
+  const log = {
+    info: fields => entries.push(fields), warn: fields => entries.push(fields),
+    error: fields => entries.push(fields)
+  };
+  const loadAuth = () => openRemoteAuth({ command, ...options, log });
+  const old = await loadAuth();
+  link(old.state.creds);
+  await old.saveCreds();
+  t.after(() => old.release());
+
+  const timers = new Set();
+  const sockets = [];
+  const replies = [];
+  const manager = createConnectionManager({
+    phone: '18005550000', reasons: DisconnectReason, log, loadAuth,
+    requestPairingCode: () => assert.fail('Restored session must not require a pairing code'),
+    onMessages: createMessageHandler({ log }),
+    now: () => 1700000000000,
+    makeSocket(state) {
+      assert.equal(state.creds.me.id, jid);
+      const sock = {
+        ev: makeEventBuffer(pino({ level: 'silent' })),
+        ws: new EventEmitter(),
+        end() {},
+        sendMessage: async (target, message) => { replies.push({ target, message }); }
+      };
+      sockets.push(sock);
+      return sock;
+    },
+    schedule(fn, delay) {
+      const timer = { fn, delay };
+      timers.add(timer);
+      return timer;
+    },
+    cancel: timer => timers.delete(timer)
+  });
+  t.after(() => manager.stop());
+  function fire(delay) {
+    const timer = [...timers].find(timer => timer.delay === delay);
+    assert.ok(timer, `Expected ${delay}ms timer`);
+    timers.delete(timer);
+    timer.fn();
+  }
+  async function until(check) {
+    for (let i = 0; i < 40; i++) {
+      if (check()) return;
+      await new Promise(resolve => setTimeout(resolve, 15));
+    }
+    assert.fail('Expected recovery state did not occur');
+  }
+  function menu(sock, id, type = 'notify', timestamp = 1700000000) {
+    sock.ev.emit('messages.upsert', { type, messages: [
+      { key: { remoteJid: jid, id }, messageTimestamp: timestamp, message: { conversation: '.menu' } }
+    ] });
+  }
+  await manager.start();
+  assert.equal(manager.requestPairing().reason, 'auth_storage_busy');
+  assert.equal(sockets.length, 0);
+  for (const [delay, next] of [[1000, 2000], [2000, 4000], [4000, 8000]]) {
+    fire(delay);
+    await until(() => [...timers].some(timer => timer.delay === next));
+    assert.equal(sockets.length, 0);
+  }
+  // Simulate forced process termination with no graceful release.
+  await command(['PEXPIRE', 'shelby:auth:{test}:lease', 1]);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  fire(8000);
+  await until(() => sockets.length === 1);
+  await old.release();
+  assert.ok(await command(['PTTL', 'shelby:auth:{test}:lease']) > 0);
+  const first = sockets[0];
+  first.ws.emit('open');
+  assert.equal(manager.connected, false);
+  first.ev.buffer();
+  menu(first, 'early');
+  first.ev.flush();
+  assert.equal(replies.length, 0);
+  first.ev.buffer();
+  menu(first, 'historical', 'append', 1699999900);
+  menu(first, 'buffered', 'append');
+  first.ev.emit('connection.update', { connection: 'open' });
+  first.ev.emit('connection.update', { connection: 'open' });
+  assert.equal(manager.connected, true);
+  await until(() => replies.length === 1);
+  fire(30_000);
+  await until(() => replies.length === 2);
+  assert.ok(replies.every(({ message }) => /MAIN MENU/.test(message.text)));
+  assert.ok(entries.some(fields => fields.reason === 'auth_lease_acquired'));
+  assert.ok(entries.some(fields => fields.reason === 'whatsapp_open'));
+  assert.ok(entries.some(fields => fields.reason === 'startup_event_buffer_flushed'));
+  assert.doesNotMatch(JSON.stringify(entries), /18005550000|synthetic-account/);
+
+  first.ev.emit('connection.update', {
+    connection: 'close', lastDisconnect: { error: { output: { statusCode: 428 } } }
+  });
+  await until(() => [...timers].some(timer => timer.delay === 1000));
+  fire(1000);
+  await until(() => sockets.length === 2);
+  sockets[1].ev.emit('connection.update', { connection: 'open' });
+  menu(first, 'stale');
+  menu(sockets[1], 'new-socket');
+  await until(() => replies.length === 3);
+  await manager.stop();
+});
+
+test('a lost Redis lease-acquisition response releases only the attempted owner', { skip: !hasRedis }, async t => {
+  const { command } = await redis(t);
+  await assert.rejects(openRemoteAuth({
+    ...options, async command(args) {
+      const result = await command(args);
+      if (args[0] === 'SET') throw new Error('synthetic lost response');
+      return result;
+    }
+  }));
+  assert.equal(await command(['PTTL', 'shelby:auth:{test}:lease']), -2);
+  const current = await openRemoteAuth({ command, ...options });
+  await assert.rejects(openRemoteAuth({
+    ...options, async command(args) {
+      const result = await command(args);
+      if (args[0] === 'SET') throw new Error('synthetic lost response');
+      return result;
+    }
+  }));
+  assert.ok(await command(['PTTL', 'shelby:auth:{test}:lease']) > 0);
+  await current.release();
+});

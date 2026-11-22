@@ -25,7 +25,7 @@ process.umask(0o077);
 const accounts = createAccountStore(process.env.BOT_ACCOUNTS_DIR || './shelby-accounts');
 const onMessages = createMessageHandler({ downloadMediaMessage, log, privateLogger, accounts });
 
-const loadRemoteAuth = createRemoteAuthLoader({ authDir });
+const loadRemoteAuth = createRemoteAuthLoader({ authDir, log });
 
 const connection = createConnectionManager({
   phone: pairingToken && /^[1-9][0-9]{5,14}$/.test(phone) ? phone : '',
@@ -39,7 +39,9 @@ const connection = createConnectionManager({
   makeSocket: (auth, onNotificationError) => makeWASocket({
     auth,
     browser: pairingBrowser,
-    logger: createBaileysDiagnosticLogger(privateLogger, onNotificationError),
+    logger: createBaileysDiagnosticLogger(privateLogger, onNotificationError, (reason, statusCode) => {
+      log.warn({ reason, statusCode }, 'WhatsApp startup or message processing failed');
+    }),
     connectTimeoutMs: 30000,
     keepAliveIntervalMs: 30000,
   }),
