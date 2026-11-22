@@ -6,7 +6,7 @@ import path from 'node:path';
 import { getWAUploadToServer, jidNormalizedUser } from '@whiskeysockets/baileys';
 import { commandReply } from './shelby-commands.js';
 import { detectImageFormat, processImage } from './shelby-image.js';
-import { timeStage } from './runtime-diagnostics.js';
+import { HIGH_RES_TRANSCODE_HEADROOM, mediaMemoryLimit, memorySnapshot, timeStage } from './runtime-diagnostics.js';
 import { repackVideo, VideoError } from './ffmpeg.js';
 
 export const MAX_STATUS_INPUT_BYTES = 150_000_000;
@@ -22,6 +22,7 @@ const userMessages = {
   output_invalid: 'Video yang diproses tidak serasi. Sila cuba fail MP4 atau MOV lain.',
   unsupported_video: 'Format video tidak disokong atau fail rosak. Sila hantar fail MP4 atau MOV.',
   timeout: 'Masa pemprosesan tamat. Sila cuba video yang lebih kecil atau pendek.',
+  video_memory_budget: 'Pelayan tidak mempunyai memori mencukupi untuk menukar video beresolusi tinggi ini. Sila hantar versi 1080p.',
   memory_exhausted: 'Memori pelayan tidak mencukupi. Sila cuba video beresolusi lebih rendah.',
   tool_terminated: 'Pemprosesan video terhenti. Sila cuba video beresolusi lebih rendah.',
   disk_full: 'Storan sementara penuh. Sila cuba lagi kemudian.',
@@ -56,7 +57,8 @@ export function createMessageHandler({
   jobTimeoutMs = Number(process.env.BOT_MEDIA_JOB_TIMEOUT_MS ?? 900_000),
   maxBytes = Number(process.env.BAILEYS_MAX_INPUT_BYTES ?? MAX_STATUS_INPUT_BYTES),
   maxOutputBytes = Number(process.env.BAILEYS_MAX_OUTPUT_BYTES ?? MAX_STATUS_INPUT_BYTES),
-  downloadTimeoutMs = DOWNLOAD_TIMEOUT_MS
+  downloadTimeoutMs = DOWNLOAD_TIMEOUT_MS,
+  readMemory = memorySnapshot
 }) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_STATUS_INPUT_BYTES) {
     throw new Error('BAILEYS_MAX_INPUT_BYTES must be an integer between 1 and 150000000.');
@@ -71,6 +73,12 @@ export function createMessageHandler({
   ]) {
     if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(`Invalid ${name}`);
   }
+  const memoryLimit = mediaMemoryLimit(readMemory());
+  const workers = Math.min(concurrency, Math.max(1,
+    Math.floor((memoryLimit - 128 * 1024 ** 2) / HIGH_RES_TRANSCODE_HEADROOM)));
+  if (workers < concurrency) {
+    log.info?.({ requestedWorkers: concurrency, workers, memoryLimitBytes: memoryLimit }, 'Media concurrency limited by memory');
+  }
   const seen = new Set();
   const accepted = new Set();
   const queue = [];
@@ -81,7 +89,7 @@ export function createMessageHandler({
     sock.sendMessage(jid, { text })).catch(() => {});
 
   function pump() {
-    while (!stopping && active.size < concurrency && queue.length) {
+    while (!stopping && active.size < workers && queue.length) {
       const job = queue.shift();
       const controller = new AbortController();
       const task = processMedia(job, controller).catch(() => {
@@ -150,7 +158,7 @@ export function createMessageHandler({
         ({ path: output, mimetype, metrics } = result);
       } else {
         metrics = await repackVideo(input, output, {
-          statusVideo: true, signal, onStage: timing, inputBytes: bytes,
+          statusVideo: true, signal, onStage: timing, inputBytes: bytes, readMemory,
           onProgress: fields => log.info?.(fields, 'FFmpeg progress')
         });
       }
@@ -244,11 +252,11 @@ export function createMessageHandler({
         await sendText(sock, jid, '❌ Format fail tidak disokong. Hantar MP4, MOV, JPEG, PNG atau HEIC.');
         continue;
       }
-      if (active.size >= concurrency && queue.length >= queueCapacity) {
+      if (active.size >= workers && queue.length >= queueCapacity) {
         await sendText(sock, jid, '⏳ Barisan pemprosesan penuh. Sila hantar semula fail sebentar lagi.');
         continue;
       }
-      const waiting = active.size >= concurrency;
+      const waiting = active.size >= workers;
       if (key) accepted.add(key);
       jobs.push(new Promise(done => queue.push({ sock, jid, msg, media, kind, key, done })));
       pump();

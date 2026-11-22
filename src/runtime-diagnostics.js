@@ -9,13 +9,21 @@ function readCgroup(file) {
   }
 }
 
+const MIB = 1024 ** 2;
+export const HIGH_RES_TRANSCODE_HEADROOM = 768 * MIB;
+
+export function mediaMemoryLimit({ cgroupLimitBytes }) {
+  // A missing or unbounded cgroup must not make a small host look unlimited.
+  return Number.isSafeInteger(cgroupLimitBytes) && cgroupLimitBytes > 0 ? cgroupLimitBytes : 512 * MIB;
+}
+
 export function memorySnapshot() {
   const events = readCgroup('memory.events');
   const number = value => /^\d+$/.test(value ?? '') ? Number(value) : undefined;
   return {
     rssBytes: process.memoryUsage.rss(),
-    cgroupBytes: number(readCgroup('memory.current')),
-    cgroupLimitBytes: number(readCgroup('memory.max')),
+    cgroupBytes: number(readCgroup('memory.current') ?? readCgroup('memory/memory.usage_in_bytes')),
+    cgroupLimitBytes: number(readCgroup('memory.max') ?? readCgroup('memory/memory.limit_in_bytes')),
     oomEvents: number(/^oom (\d+)$/m.exec(events ?? '')?.[1]),
     oomKills: number(/^oom_kill (\d+)$/m.exec(events ?? '')?.[1])
   };

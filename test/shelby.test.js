@@ -106,7 +106,7 @@ test('JPEG orientation, PNG transparency and HEIC decoding preserve size and ret
   assert.deepEqual((await readdir(directory)).sort(), ['accounts', 'jpeg.jpg', 'png.png', 'reply']);
 });
 
-test('bounded queue processes one job at a time, ignores duplicates and its own messages', async t => {
+test('512 MiB clamps a configured multi-worker queue, ignores duplicates and its own messages', async t => {
   const directory = await temporary(t);
   const png = path.join(directory, 'test.png');
   await run('convert', ['-size', '20x20', 'xc:blue', png]);
@@ -118,7 +118,8 @@ test('bounded queue processes one job at a time, ignores duplicates and its own 
   const firstStarted = new Promise(resolve => { startFirst = resolve; });
   const firstGate = new Promise(resolve => { releaseFirst = resolve; });
   const handler = createMessageHandler({
-    queueCapacity: 1, concurrency: 1, tempRoot: directory, log: logger,
+    queueCapacity: 1, concurrency: 4, tempRoot: directory, log: logger,
+    readMemory: () => ({ cgroupLimitBytes: 512 * 1024 ** 2 }),
     async downloadMediaMessage(msg) {
       calls.push(msg.key.id);
       if (msg.key.id === 'first') {

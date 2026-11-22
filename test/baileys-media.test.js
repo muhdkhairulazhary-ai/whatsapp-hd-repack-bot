@@ -383,3 +383,60 @@ exec "${actualFfmpeg.trim()}" "$@"
   await writeFile(path.join(dir, 'ffmpeg'), '#!/bin/sh\nfor argument do output=$argument; done\nprintf invalid > "$output"\n');
   await assert.rejects(repackVideo(input, output, { statusVideo: true }), { stage: 'verification', reason: 'output_invalid' });
 });
+
+test('512 MiB refuses UHD HEVC before encoding and keeps UHD Smart Copy with an exact upload cap', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'wa-uhd-budget-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const hevc = path.join(dir, 'uhd.mov');
+  const avc = path.join(dir, 'compatible.mp4');
+  const fixture = ['-v', 'error', '-f', 'lavfi', '-i', 'color=size=3840x2160:rate=10',
+    '-f', 'lavfi', '-i', 'sine=frequency=500', '-t', '0.2', '-threads:v', '1', '-c:a', 'aac'];
+  await run('ffmpeg', [...fixture, '-c:v', 'libx265', '-preset', 'ultrafast',
+    '-x265-params', 'pools=none:frame-threads=1:log-level=error', hevc]);
+  await run('ffmpeg', [...fixture, '-c:v', 'libx264', '-preset', 'ultrafast', avc]);
+
+  const mib = 1024 ** 2;
+  const readMemory = () => ({ cgroupLimitBytes: 512 * mib, cgroupBytes: 128 * mib, rssBytes: 80 * mib });
+  const { repackVideo } = await import('../src/ffmpeg.js');
+  const output = path.join(dir, 'copy.mp4');
+  const metrics = await repackVideo(avc, output, { statusVideo: true, readMemory });
+  assert.equal(metrics.videoMode, 'copy');
+  assert.equal(metrics.output.width, 3840);
+  assert.equal(metrics.output.height, 2160);
+
+  const sent = [];
+  const errors = [];
+  const stages = [];
+  const sock = { sendMessage: async (_, message) => { sent.push(message); } };
+  const create = maxOutputBytes => createMessageHandler({
+    tempRoot: dir, maxOutputBytes, readMemory,
+    log: { info: fields => { if (fields.stage) stages.push(fields.stage); }, error: fields => errors.push(fields) },
+    async downloadMediaMessage(msg) {
+      return Readable.from([await readFile(msg.key.id === 'uhd-hevc' ? hevc : avc)]);
+    }
+  });
+  const send = (handler, id) => handler(sock, videoEvent(id));
+  await send(create(metrics.output.bytes), 'uhd-hevc');
+  assert.equal(errors.at(-1).reason, 'video_memory_budget');
+  assert.match(sent.at(-1).text, /1080p/);
+  assert.equal(stages.includes('ffmpeg'), false);
+  await send(create(metrics.output.bytes), 'exact-cap');
+  assert.equal(sent.filter(message => message.video).length, 1);
+  await send(create(metrics.output.bytes - 1), 'over-cap');
+  assert.equal(sent.filter(message => message.video).length, 1);
+  assert.equal(errors.at(-1).reason, 'output_limit');
+  assert.equal(errors.at(-1).outputBytes, metrics.output.bytes);
+  assert.deepEqual((await readdir(dir)).sort(), ['compatible.mp4', 'copy.mp4', 'uhd.mov']);
+
+  // A failed UHD remux must not fall through to a memory-unsafe video encode.
+  const previousPath = process.env.PATH;
+  t.after(() => { process.env.PATH = previousPath; });
+  await writeFile(path.join(dir, 'ffmpeg'), '#!/bin/sh\nfor argument do output=$argument; done\nprintf invalid > "$output"\n',
+    { mode: 0o700 });
+  process.env.PATH = `${dir}:${previousPath}`;
+  const attempts = [];
+  await assert.rejects(repackVideo(avc, output, {
+    statusVideo: true, readMemory, onStage: fields => attempts.push(fields.stage)
+  }), { reason: 'video_memory_budget' });
+  assert.deepEqual(attempts, ['ffprobe', 'ffmpeg', 'verification']);
+});

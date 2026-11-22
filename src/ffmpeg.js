@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import { config } from './config.js';
-import { memorySnapshot, timeStage } from './runtime-diagnostics.js';
+import { HIGH_RES_TRANSCODE_HEADROOM, mediaMemoryLimit, memorySnapshot, timeStage } from './runtime-diagnostics.js';
 
 export class VideoError extends Error {
   constructor(stage, reason, message, details = {}) {
@@ -172,7 +172,7 @@ async function probeVideo(inputPath, statusVideo, signal, stage = 'validation') 
     ? 'format=duration,bit_rate:format_tags=major_brand:stream=codec_type,codec_name,profile,pix_fmt,width,height,avg_frame_rate,r_frame_rate,bit_rate,channels,start_time,duration,field_order,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data=rotation,displaymatrix'
     : 'format=duration';
   const output = await runTool('ffprobe', [
-    '-v', 'error', ...(statusVideo ? ['-protocol_whitelist', 'file', '-f', 'mov'] : []),
+    '-v', 'error', ...(statusVideo ? ['-threads', '1', '-protocol_whitelist', 'file', '-f', 'mov'] : []),
     '-show_entries', entries, '-of', 'json', inputPath
   ], { stage, timeoutMs: 15_000, captureOutput: true, signal });
   let metadata;
@@ -240,7 +240,7 @@ function verifyStatusVideo(input, output, preserveMatrix) {
 }
 
 export async function repackVideo(inputPath, outputPath, {
-  statusVideo = false, signal, onProgress, onStage, inputBytes
+  statusVideo = false, signal, onProgress, onStage, inputBytes, readMemory = memorySnapshot
 } = {}) {
   const input = await timeStage('ffprobe', onStage, () => probeVideo(inputPath, statusVideo, signal));
   const maxSeconds = statusVideo ? Math.min(config.maxVideoSeconds, 60) : config.maxVideoSeconds;
@@ -259,6 +259,20 @@ export async function repackVideo(inputPath, outputPath, {
   if (statusVideo) {
     async function produce(fallback) {
       const { args, videoMode, audioMode } = buildStatusArgs(inputPath, outputPath, input, fallback);
+      // The single-threaded UHD HEVC benchmark alone reached 583 MiB.
+      // Check immediately before encoding, including after a failed remux.
+      if (videoMode === 'encode' && input.video.width * input.video.height > 1920 * 1080) {
+        const memory = readMemory();
+        const limit = mediaMemoryLimit(memory);
+        const used = Math.max(memory.cgroupBytes ?? 0, memory.rssBytes ?? 0);
+        const available = Math.max(0, limit - used);
+        if (available < HIGH_RES_TRANSCODE_HEADROOM) {
+          throw new VideoError('validation', 'video_memory_budget', 'High-resolution transcode exceeds safe memory budget.', {
+            width: input.video.width, height: input.video.height, memoryLimitBytes: limit,
+            availableBytes: available, requiredBytes: HIGH_RES_TRANSCODE_HEADROOM
+          });
+        }
+      }
       await convert(args);
       return timeStage('verification', onStage, async () => {
         const output = await stat(outputPath);
