@@ -7,3 +7,14 @@ uploads
 *.mov
 *.3gp
 README.md
+**/baileys-auth
+**/creds.json
+.env.*
+**/app-state-sync-*.json
+**/pre-key-*.json
+**/session-*.json
+**/sender-key-*.json
+**/lid-mapping-*.json
+**/device-list-*.json
+**/tctoken-*.json
+**/identity-key-*.json

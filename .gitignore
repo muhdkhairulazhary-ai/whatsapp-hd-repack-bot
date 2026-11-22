@@ -11,3 +11,13 @@ uploads/
 npm-debug.log*
 # WhatsApp Web session credentials
 baileys-auth/
+# Also exclude auth state under custom paths in this checkout.
+**/creds.json
+**/app-state-sync-*.json
+**/pre-key-*.json
+**/session-*.json
+**/sender-key-*.json
+**/lid-mapping-*.json
+**/device-list-*.json
+**/tctoken-*.json
+**/identity-key-*.json

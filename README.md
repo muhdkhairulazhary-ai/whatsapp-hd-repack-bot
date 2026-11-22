@@ -4,7 +4,9 @@ A Node.js WhatsApp Business Cloud API webhook that receives a video, securely do
 
 **Output:** MP4 container · H.264 video · AAC audio · yuv420p · aspect ratio preserved.
 
-This project uses the official Meta WhatsApp Cloud API only. It does not automate WhatsApp Web, access private sessions, or publish WhatsApp Status updates.
+The webhook described in this README uses the official Meta WhatsApp Cloud API.
+
+For the feature branch that uses WhatsApp Linked Devices, see [Baileys deployment and iPhone pairing](BAILEYS.md).
 
 ## Features
 
