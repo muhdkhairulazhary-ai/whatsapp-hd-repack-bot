@@ -7,14 +7,14 @@ The feature branch runs a WhatsApp Linked Devices companion using Baileys. The C
 1. Review and merge the fix PR into `feature/baileys-whatsapp-bot` in Safari. If you want a manual rollout and this branch has Auto-Deploy enabled, disable Auto-Deploy before merging.
 2. In Render, open `whatsapp-hd-repack-bot-1`. Verify the service uses that feature branch, one instance, and `/health` as the health check path. The Docker image includes FFmpeg, FFprobe and ImageMagick and defaults to `node src/baileys-server.js` so Node receives container signals directly. If the service already uses Docker, keep that runtime.
 3. Verify that `BAILEYS_PHONE_NUMBER` contains the country code and number as digits, and that `PAIRING_ACCESS_TOKEN` is a long, private random secret. Rotate any previously exposed token. Keep `BAILEYS_AUTH_DIR` pointing to the existing session directory if it holds your linked session.
-4. Choose **Manual Deploy → Deploy latest commit** when ready. Open the service HTTPS URL with `/health` appended. `ok: true` means the HTTP process is alive. `whatsappConnected: true` appears after WhatsApp login completes.
+4. Choose **Manual Deploy → Deploy latest commit** when ready. Open the service HTTPS URL with `/health` appended. `{"status":"ok"}` means the HTTP process is alive. The authenticated `POST /pairing` reports `already_linked` after WhatsApp login completes.
 
 ## Pair on the same iPhone
 
 1. Create a private shortcut in Apple's **Shortcuts** app. Add a **URL** action with your Render HTTPS URL followed by `/pairing`.
 2. Add **Get Contents of URL**, select **POST**, and under **Headers** add `Authorization` with value `Bearer YOUR_TOKEN`. Leave the body empty. Add **Show Result** to display the response. Keep this shortcut private because its configuration contains your token.
 3. Run the shortcut. Run it again after a few seconds while the status is `connecting` or `waiting_for_whatsapp`. Read the `code` when the status is `pairing_code_ready`. The bot shows the code after WhatsApp acknowledges the registration request and returns a pairing reference. The same code stays available for up to 60 seconds, or until the phone responds or the socket closes.
-4. In WhatsApp, open **Settings → Linked Devices → Link a Device → Link with phone number instead** and enter the code. The phone-number option may also appear in a WhatsApp notification. Reopen `/health` and look for `whatsappConnected: true`.
+4. In WhatsApp, open **Settings → Linked Devices → Link a Device → Link with phone number instead** and enter the code. The phone-number option may also appear in a WhatsApp notification. Run the authenticated pairing shortcut again and look for `already_linked`.
 5. If you see `pairing_code_expired` or `connection_failed`, add `?refresh=1` to the shortcut URL and run it again. Refresh starts a new attempt once the previous one has stopped. If failures repeat, use the response's `reason` and numeric `statusCode` when troubleshooting. For a logged-out or invalid saved session, preserve the old directory and use a fresh private directory only when you intend to link again. For a replaced connection, check for another running instance using the same session.
 6. Ask another WhatsApp user to send `.ping` and a short MP4. The bot ignores messages sent by its own account.
 
@@ -49,9 +49,9 @@ Update any old explicit timeout values in Render when deploying. The FFmpeg cloc
 
 ### Migrate an existing linked device
 
-- If you have a secure, complete local snapshot, stop writes to that snapshot and make all Baileys auth files available in a private directory at startup. Set `BAILEYS_AUTH_DIR` to that directory and enable `BAILEYS_AUTH_MIGRATE_LOCAL=1` for the import. The import parses and encrypts all records, then commits them together only when the target Redis session is empty. It leaves the local files intact. Verify `/health` shows `whatsappConnected: true`, then remove the migration flag before a later deployment. The Redis session takes precedence once populated.
+- If you have a secure, complete local snapshot, stop writes to that snapshot and make all Baileys auth files available in a private directory at startup. Set `BAILEYS_AUTH_DIR` to that directory and enable `BAILEYS_AUTH_MIGRATE_LOCAL=1` for the import. The import parses and encrypts all records, then commits them together only when the target Redis session is empty. It leaves the local files intact. Verify the authenticated `POST /pairing` shows `already_linked`, then remove the migration flag before a later deployment. The Redis session takes precedence once populated.
 - Render Free has no persistent disk and may provide no safe way to access a live instance's full auth directory. If that snapshot is unavailable, leave migration disabled, deploy with the Redis settings, and use the existing authenticated phone-number pairing flow once. The new linked device will save its state in Redis. Keep private files and keys out of GitHub, build contexts, URLs and chat.
-- After a controlled restart, verify the existing linked device reconnects in `/health` without requesting a code. A Redis outage, wrong key, or corrupt snapshot stops recovery without creating a replacement session. Check the store or restore the correct key first. After a genuine revocation and when you intend to link again, use a new `BAILEYS_AUTH_SESSION_ID` and leave migration disabled. This preserves the old encrypted snapshot.
+- After a controlled restart, verify the authenticated `POST /pairing` reports `already_linked` without requesting a code. A Redis outage, wrong key, or corrupt snapshot stops recovery without creating a replacement session. Check the store or restore the correct key first. After a genuine revocation and when you intend to link again, use a new `BAILEYS_AUTH_SESSION_ID` and leave migration disabled. This preserves the old encrypted snapshot.
 
 The adapter encrypts credentials and Signal values with AES-256-GCM before transmission and obscures Signal record names. Writes are atomic batches guarded by a renewable 45-second lease. Storage recovery uses bounded exponential retries through 32 seconds to cover deployment overlap and lease expiry. A storage error never falls back to a new local account. Upstash lists 250 MB storage, 10 GB monthly bandwidth and 500,000 monthly commands for Free. Continuous lease renewal at 15-second intervals uses about 173,000 commands per 30 days before auth writes. A session snapshot must fit the provider's REST response and import request limits. The free tier, provider availability and WhatsApp's linked-device rules still apply. The store preserves auth across Render spin-down, but the bot cannot receive messages while the Render process is asleep. [Upstash pricing](https://upstash.com/pricing/redis) · [Upstash REST API](https://upstash.com/docs/redis/features/restapi) · [Render Free](https://render.com/docs/free)
 
@@ -67,7 +67,7 @@ The bot uses the protocol version bundled with Baileys 6.7.24. A registration ac
 | `pairing_phone_reference_mismatch` | The phone notification's reference did not match the active request. |
 | `pairing_finish_unconfirmed` | The matching phone notification arrived, but the finish acknowledgement did not. |
 | `pairing_signed_response_missing` or `pairing_signed_response_failed` | The signed response was missing or received without establishing a signed account identity. |
-| `link_accepted` | The signed account identity was accepted. The socket must complete login before `/health` shows `whatsappConnected: true`. |
+| `link_accepted` | The signed account identity was accepted. The socket must complete login before the authenticated `POST /pairing` shows `already_linked`. |
 
 Report the last reason and numeric status code, with the approximate time of the attempt. Keep the pairing code, token, phone number, raw protocol data and credentials private. A notification processing warning during pairing is diagnostic context because Baileys uses that logger hook for all notifications.
 
@@ -111,7 +111,7 @@ Images are validated by content and decoded with ImageMagick. The Docker build s
 
 ### Manual iPhone check
 
-1. After a manual deploy, open `/health` and look for `whatsappConnected: true`. Keep the existing session path.
+1. After a manual deploy, open `/health` for HTTP liveness and check the authenticated `POST /pairing` for `already_linked`. Keep the existing session path.
 2. From another WhatsApp account, send `.daftar Azhary`, repeat it, and check `.menu`, `.help` and `.status`.
 3. Send an H.264/AAC 1080p MP4, an iPhone HEVC MOV, a rotated JPEG, a transparent PNG and a HEIC document. Check that replies have no captions. Confirm the counts in `.status`.
 4. Send an oversized or unsupported file and check the Malay reply. Send several files together and check the wait and queue-full replies.

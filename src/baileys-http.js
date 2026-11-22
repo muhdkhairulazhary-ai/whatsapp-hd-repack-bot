@@ -22,7 +22,7 @@ export function createBaileysHandler(connection, token) {
       }
       return json(200, result);
     }
-    if (req.url === '/health') return json(200, { ok: true, whatsappConnected: connection.connected });
+    if (pathname === '/health' && req.method === 'GET') return json(200, { status: 'ok' });
     return json(404, { error: 'Not found' });
   };
 }
