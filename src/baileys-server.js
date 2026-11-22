@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import http from 'node:http';
 import { repackVideo } from './ffmpeg.js';
 
 const log = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -14,6 +15,13 @@ const authDir = process.env.BAILEYS_AUTH_DIR || './baileys-auth';
 const phone = (process.env.BAILEYS_PHONE_NUMBER || '').replace(/\D/g, '');
 const maxBytes = Number(process.env.MAX_INPUT_BYTES || 16 * 1024 * 1024);
 const seen = new Set();
+const port = Number(process.env.PORT || 3000);
+let connected = false;
+http.createServer((req, res) => {
+  if (req.url !== '/health') { res.writeHead(404); return res.end('Not found'); }
+  res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(JSON.stringify({ ok: true, whatsappConnected: connected }));
+}).listen(port, '0.0.0.0', () => log.info({ port }, 'Health server listening'));
 let busy = false;
 
 async function start() {
@@ -31,8 +39,9 @@ async function start() {
         log.warn({ pairingCode: code }, 'Temporary pairing code; protect your logs');
       } catch (err) { pairingRequested = false; log.error({ err }, 'Pairing failed'); }
     }
-    if (connection === 'open') log.info('WhatsApp linked');
+    if (connection === 'open') { connected = true; log.info('WhatsApp linked'); }
     if (connection === 'close') {
+      connected = false;
       const status = lastDisconnect?.error?.output?.statusCode;
       if (status !== DisconnectReason.loggedOut) setTimeout(start, 5000);
       else log.error('Logged out: remove stale auth and pair again');
