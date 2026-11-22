@@ -1,12 +1,13 @@
 // Experimental WhatsApp Web transport. Not the official Meta API.
 // Run with: node src/baileys-server.js
 import 'dotenv/config';
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMessage, Browsers } from '@whiskeysockets/baileys';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMessage } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { mkdir } from 'node:fs/promises';
 import http from 'node:http';
 import { createMessageHandler } from './baileys-media.js';
 import { createConnectionManager } from './baileys-connection.js';
+import { createBaileysDiagnosticLogger, pairingBrowser, requestConfirmedPairingCode } from './baileys-pairing.js';
 import { createBaileysHandler } from './baileys-http.js';
 
 const log = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -27,10 +28,11 @@ const connection = createConnectionManager({
     await mkdir(authDir, { recursive: true, mode: 0o700 });
     return useMultiFileAuthState(authDir);
   },
-  makeSocket: auth => makeWASocket({
+  requestPairingCode: requestConfirmedPairingCode,
+  makeSocket: (auth, onNotificationError) => makeWASocket({
     auth,
-    browser: Browsers.macOS('Desktop'),
-    logger: privateLogger,
+    browser: pairingBrowser,
+    logger: createBaileysDiagnosticLogger(privateLogger, onNotificationError),
     connectTimeoutMs: 30000,
     keepAliveIntervalMs: 30000,
   }),
