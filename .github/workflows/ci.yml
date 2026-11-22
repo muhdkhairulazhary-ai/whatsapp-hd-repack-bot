@@ -15,6 +15,7 @@ jobs:
         with:
           node-version: 20
       - run: npm install --no-audit --no-fund
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick
       - run: npm test
       - name: Check JavaScript syntax
         run: |

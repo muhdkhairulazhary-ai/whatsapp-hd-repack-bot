@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import pino from 'pino';
+import { branding } from './shelby-commands.js';
 import { config, assertConfigured } from './config.js';
 import { verifyMetaSignature } from './security.js';
 import { parseCommand, HELP_TEXT } from './commands.js';
@@ -18,6 +19,7 @@ const pendingMedia = new Map();
 const MEDIA_TTL_MS = 30 * 60 * 1000;
 const recentMessages = new Map();
 app.use(express.static('public'));
+app.get('/branding', (req, res) => res.json({ fullName: branding.fullName, tagline: branding.tagline }));
 app.use(converterRouter);
 
 // Keep the exact raw bytes for Meta's X-Hub-Signature-256 verification.

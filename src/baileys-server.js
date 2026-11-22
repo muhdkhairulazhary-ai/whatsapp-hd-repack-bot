@@ -5,6 +5,8 @@ import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMes
 import pino from 'pino';
 import { mkdir } from 'node:fs/promises';
 import http from 'node:http';
+import { createAccountStore } from './shelby-accounts.js';
+import { branding } from './shelby-commands.js';
 import { createMessageHandler } from './baileys-media.js';
 import { createConnectionManager } from './baileys-connection.js';
 import { createBaileysDiagnosticLogger, pairingBrowser, requestConfirmedPairingCode } from './baileys-pairing.js';
@@ -18,6 +20,9 @@ const pairingToken = process.env.PAIRING_ACCESS_TOKEN || '';
 // The library logs protocol payloads and identifiers at several log levels.
 const privateLogger = pino({ level: 'silent' });
 process.umask(0o077);
+
+const accounts = createAccountStore(process.env.BOT_ACCOUNTS_DIR || './shelby-accounts');
+const onMessages = createMessageHandler({ downloadMediaMessage, log, privateLogger, accounts });
 
 const connection = createConnectionManager({
   phone: pairingToken && /^[1-9][0-9]{5,14}$/.test(phone) ? phone : '',
@@ -35,16 +40,16 @@ const connection = createConnectionManager({
     connectTimeoutMs: 30000,
     keepAliveIntervalMs: 30000,
   }),
-  onMessages: createMessageHandler({ downloadMediaMessage, log, privateLogger })
+  onMessages
 });
 
 const server = http.createServer(createBaileysHandler(connection, pairingToken));
-server.listen(port, '0.0.0.0', () => log.info({ port }, 'Health server listening'));
+server.listen(port, '0.0.0.0', () => log.info({ port, bot: branding.fullName }, 'Health server listening'));
 void connection.start();
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.once(signal, () => {
     server.close();
-    void connection.stop();
+    void Promise.all([onMessages.stop(), connection.stop()]);
   });
 }

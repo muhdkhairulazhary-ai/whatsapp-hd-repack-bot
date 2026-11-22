@@ -4,19 +4,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>StatusHD Converter</title>
+  <title>Shelby+ HD Status Bot</title>
   <style>
     * { box-sizing: border-box; }
     body {
       margin: 0; padding: 24px 16px;
-      background: #0f172a; color: white;
+      background: #100f11; color: white;
       font-family: -apple-system, Arial, sans-serif;
     }
     main { max-width: 480px; margin: 40px auto; }
-    h1 { color: #4ade80; margin-bottom: 8px; }
-    p { color: #cbd5e1; line-height: 1.5; }
+    h1 { color: #ff505b; margin-bottom: 8px; }
+    p { color: #ddd8db; line-height: 1.5; }
     .panel {
-      background: #1e293b; padding: 22px;
+      background: #211c20; padding: 22px;
       border-radius: 18px; margin-top: 24px;
     }
     input, select, button { width: 100%; margin-top: 16px; }
@@ -26,7 +26,7 @@
       border-radius: 12px; font-size: 16px;
     }
     button {
-      background: #22c55e; color: #052e16;
+      background: #be2532; color: #fff;
       font-weight: bold; cursor: pointer;
     }
     button:disabled { opacity: .5; }
@@ -35,7 +35,7 @@
     #download {
       display: none; text-align: center;
       padding: 15px; margin-top: 16px;
-      background: #22c55e; color: #052e16;
+      background: #be2532; color: #fff;
       border-radius: 12px; font-weight: bold;
       text-decoration: none;
     }
@@ -43,24 +43,25 @@
 </head>
 <body>
 <main>
-  <h1>🎬 StatusHD Converter</h1>
-  <p>Convert video HD untuk WhatsApp Status.
+  <h1 id="bot-title">Shelby+ HD Status Bot</h1>
+  <p id="bot-tagline">Your Status. Your Quality.</p>
+  <p>Tukar video HD untuk WhatsApp Status.
      Sesuai digunakan melalui Safari iPhone.</p>
 
   <div class="panel">
-    <strong>Upload Video (Max 100 MB)</strong>
+    <strong>Muat naik video (maksimum 100 MB)</strong>
     <input id="file" type="file" accept="video/*">
 
     <video id="preview" controls playsinline hidden></video>
 
     <select id="quality">
-      <option value="hd">High Quality HD</option>
-      <option value="small">Compress bawah 32 MB</option>
+      <option value="hd">Kualiti tinggi HD</option>
+      <option value="small">Mampatkan di bawah 32 MB</option>
     </select>
 
-    <button id="convert">Convert Video HD</button>
+    <button id="convert">Tukar video HD</button>
     <p id="status"></p>
-    <a id="download">Download Video MP4</a>
+    <a id="download">Muat turun video MP4</a>
   </div>
 </main>
 
@@ -71,6 +72,13 @@ const button = document.getElementById('convert');
 const status = document.getElementById('status');
 const download = document.getElementById('download');
 let previewUrl;
+
+fetch('/branding').then(response => response.ok ? response.json() : null).then(brand => {
+  if (!brand) return;
+  document.title = brand.fullName;
+  document.getElementById('bot-title').textContent = brand.fullName;
+  document.getElementById('bot-tagline').textContent = brand.tagline;
+}).catch(() => {});
 
 fileInput.addEventListener('change', () => {
   const file = fileInput.files[0];
@@ -99,7 +107,7 @@ button.addEventListener('click', async () => {
 
   button.disabled = true;
   download.style.display = 'none';
-  status.textContent = '⏳ Upload dan convert video...';
+  status.textContent = '⏳ Memuat naik dan menukar video...';
 
   try {
     const form = new FormData();

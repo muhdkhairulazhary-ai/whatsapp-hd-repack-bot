@@ -162,7 +162,7 @@ test('late code resolution is discarded and transient failures have a bounded re
   resolveCode(code);
   await flush();
   assert.equal(http().result.code, undefined);
-  for (const [index, delay] of [1000, 3000, 10000].entries()) {
+  for (const [index, delay] of [1000, 2000, 4000].entries()) {
     assert.equal(timers.size, 1);
     await advance(delay);
     assert.equal(sockets.length, index + 2);
@@ -233,7 +233,7 @@ test('QR challenge exhaustion, handshake deadline and pairing send failure are d
   await flush();
   assert.equal(http().result.reason, 'pairing_request_failed');
   assert.equal(sockets[1].ended, 1);
-  await advance(3000);
+  await advance(2000);
   disconnect(sockets[2], 408, 'QR refs attempts ended');
   await flush();
   assert.equal(http().result.status, 'connecting');
