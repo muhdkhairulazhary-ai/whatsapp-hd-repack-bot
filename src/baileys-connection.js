@@ -5,6 +5,10 @@ const CONNECT_DEADLINE_MS = 60_000;
 const PHONE_NOTIFICATION_EVENT = 'CB:notification,type:link_code_companion_reg';
 const SIGNED_PAIR_EVENT = 'CB:iq,,pair-success';
 const MAX_RETRIES = 3;
+const STORAGE_RETRY_REASONS = new Set(['auth_storage_busy', 'auth_storage_unavailable', 'auth_lease_lost',
+  'credential_storage_failed']);
+const AUTH_FAILURE_REASONS = new Set([...STORAGE_RETRY_REASONS, 'auth_data_invalid', 'auth_migration_failed',
+  'auth_configuration_invalid']);
 
 export function createConnectionManager({ loadAuth, makeSocket, requestPairingCode, reasons, phone, log, onMessages,
   now = Date.now, schedule = setTimeout, cancel = clearTimeout }) {
@@ -14,7 +18,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
   ]);
   let active;
   let retryTimer;
-  let starting = false;
+  let starting;
   let stopped = false;
   let retries = 0;
   let connected = false;
@@ -25,13 +29,32 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
     log.info(status, 'WhatsApp connection state');
   }
 
-  async function start(pairing = false) {
+  function scheduleRetry(pairing, reason, statusCode, storage = false) {
+    if (stopped || retries >= (storage ? 6 : MAX_RETRIES)) return;
+    const delay = 1_000 * (2 ** retries++);
+    report('connecting', reason, statusCode);
+    retryTimer = schedule(() => {
+      retryTimer = undefined;
+      void start(pairing);
+    }, statusCode !== undefined && statusCode === reasons.restartRequired ? 0 : delay);
+  }
+
+  function start(pairing = false) {
     if (active || starting || retryTimer || stopped) return;
-    starting = true;
+    starting = connect(pairing).finally(() => { starting = undefined; });
+    return starting;
+  }
+
+  async function connect(pairing) {
     report('connecting');
+    let auth;
     try {
-      const { state, saveCreds } = await loadAuth();
-      if (stopped) return;
+      auth = await loadAuth();
+      const { state, saveCreds } = auth;
+      if (stopped) {
+        await auth.release?.();
+        return;
+      }
       // requestPairingCode writes a provisional me ID. Only pair-success provides
       // the signed account identity needed to resume an authenticated session.
       if (!state.creds.account) {
@@ -40,6 +63,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         state.creds.registered = false;
         if (!pairing || !phone) {
           report(phone ? 'waiting_for_whatsapp' : 'connection_failed', phone ? 'pairing_required' : 'pairing_not_configured');
+          await auth.release?.();
           return;
         }
       }
@@ -57,6 +81,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
       let saveFailed = false;
       let closing = false;
       const session = { close };
+      let closingTask;
       active = session;
       const isCurrent = () => active === session && !closing;
 
@@ -118,9 +143,15 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         log.warn({ reason: 'notification_processing_error_during_pairing', statusCode }, 'WhatsApp pairing diagnostic');
       }
 
-      async function close(reason, statusCode, alreadyClosed = false) {
+      function close(reason, statusCode, alreadyClosed = false) {
+        if (closingTask) return closingTask;
         if (!isCurrent()) return;
         closing = true;
+        closingTask = finishClose(reason, statusCode, alreadyClosed);
+        return closingTask;
+      }
+
+      async function finishClose(reason, statusCode, alreadyClosed) {
         connected = false;
         const hadCode = status.status === 'pairing_code_ready';
         const expired = reason === 'pairing_phone_notification_missing' || (hadCode && alreadyClosed);
@@ -137,25 +168,25 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         report(expired ? 'pairing_code_expired' : 'connection_failed', reason, statusCode);
 
         await saves;
+        await auth.release?.();
         active = undefined;
         if (stopped) return;
         if (saveFailed) {
           report('connection_failed', 'credential_storage_failed');
+          if (auth.release) scheduleRetry(pairing, 'credential_storage_failed', statusCode, true);
           return;
         }
         if (terminal.has(statusCode)) {
           report('connection_failed', reason, statusCode);
           return;
         }
-        if (!state.creds.account && waitForManualRetry) return;
         if (openedAt !== undefined && now() - openedAt >= 60_000) retries = 0;
-        if (retries >= MAX_RETRIES) return;
-        const delay = 1_000 * (2 ** retries++);
-        report('connecting', reason, statusCode);
-        retryTimer = schedule(() => {
-          retryTimer = undefined;
-          void start(pairing);
-        }, statusCode === reasons.restartRequired ? 0 : delay);
+        if (STORAGE_RETRY_REASONS.has(reason)) {
+          scheduleRetry(false, reason, statusCode, true);
+          return;
+        }
+        if (!state.creds.account && waitForManualRetry) return;
+        scheduleRetry(pairing, reason, statusCode);
       }
 
       async function onUpdate({ connection, qr, isNewLogin, lastDisconnect }) {
@@ -213,10 +244,12 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
       sock.ev.on('connection.update', onUpdate);
       sock.ev.on('messages.upsert', handleMessages);
       setDeadline(() => void close('handshake_deadline'), CONNECT_DEADLINE_MS);
-    } catch {
-      report('connection_failed', 'socket_start_failed');
-    } finally {
-      starting = false;
+      auth.onFailure?.(reason => { void close(reason); });
+    } catch (error) {
+      await auth?.release?.();
+      const reason = AUTH_FAILURE_REASONS.has(error?.authReason) ? error.authReason : 'socket_start_failed';
+      report('connection_failed', reason);
+      if (STORAGE_RETRY_REASONS.has(reason)) scheduleRetry(false, reason, undefined, true);
     }
   }
 
@@ -238,6 +271,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
     async stop() {
       stopped = true;
       cancel(retryTimer);
+      await starting;
       await active?.close('shutdown');
     }
   };

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { config } from './config.js';
 
@@ -26,6 +27,7 @@ export function buildFfmpegArgs(inputPath, outputPath) {
 function buildStatusArgs(inputPath, outputPath, { duration, video, audio }) {
   const copyVideo = video.codec_name === 'h264' && video.pix_fmt === 'yuv420p' &&
     ['Baseline', 'Constrained Baseline', 'Main', 'High'].includes(video.profile);
+  const hevc = video.codec_name === 'hevc';
   const largeFrame = video.width * video.height > 1920 * 1080;
   const copyAudio = audio?.codec_name === 'aac' && audio.profile === 'LC' && [1, 2].includes(audio.channels);
   return {
@@ -37,8 +39,9 @@ function buildStatusArgs(inputPath, outputPath, { duration, video, audio }) {
       ...(!audio ? ['-f', 'lavfi', '-t', String(duration), '-i', 'anullsrc=r=44100:cl=stereo'] : []),
       '-map', '0:V:0', '-map', audio ? '0:a:0' : '1:a:0',
       ...(copyVideo ? ['-c:v', 'copy'] : [
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
-        '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2', '-fps_mode:v', 'passthrough', '-enc_time_base:v', '-1',
+        '-c:v', 'libx264', '-preset', hevc ? 'superfast' : 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
+        ...(video.width % 2 || video.height % 2 ? ['-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2'] : []),
+        '-fps_mode:v', 'passthrough', '-enc_time_base:v', '-1',
         '-threads:v', largeFrame ? '1' : '2',
         '-x264-params', largeFrame ? 'rc-lookahead=4:sync-lookahead=0' : 'rc-lookahead=10'
       ]),
@@ -48,26 +51,61 @@ function buildStatusArgs(inputPath, outputPath, { duration, video, audio }) {
   };
 }
 
-export function runTool(command, args, { stage, timeoutMs, captureOutput = false, signal, env = process.env }) {
+function oomKillCount() {
+  try {
+    const counters = readFileSync('/sys/fs/cgroup/memory.events', 'utf8');
+    const count = /^oom_kill (\d+)$/m.exec(counters)?.[1];
+    return count === undefined ? undefined : Number(count);
+  } catch {
+    return undefined;
+  }
+}
+
+function ffmpegProgress(stream, onProgress, intervalMs) {
+  const started = Date.now();
+  let pending = '';
+  const values = {};
+  stream.on('data', chunk => {
+    const lines = (pending + chunk).split('\n');
+    pending = lines.pop().slice(-256);
+    for (const line of lines) {
+      const match = /^(frame|out_time_us|total_size|speed)=(\d+(?:\.\d+)?)(?:x)?\s*$/.exec(line);
+      if (match) values[match[1]] = Number(match[2]);
+    }
+  });
+  return setInterval(() => onProgress({
+    stage: 'ffmpeg', elapsedMs: Date.now() - started,
+    frames: values.frame, outputTimeMs: values.out_time_us === undefined ? undefined : values.out_time_us / 1000,
+    outputBytes: values.total_size, speed: values.speed
+  }), intervalMs);
+}
+
+export function runTool(command, args, { stage, timeoutMs, captureOutput = false, signal, env = process.env, onProgress, progressIntervalMs = 15_000 }) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new VideoError(stage, 'timeout', 'Media processing was stopped.'));
       return;
     }
-    const child = spawn(command, args, { env, stdio: ['ignore', captureOutput ? 'pipe' : 'ignore', 'pipe'] });
+    const oomBefore = stage === 'ffmpeg' ? oomKillCount() : undefined;
+    const child = spawn(command, args, {
+      env, stdio: ['ignore', captureOutput ? 'pipe' : 'ignore', 'pipe', onProgress ? 'pipe' : 'ignore']
+    });
+    const progress = onProgress && ffmpegProgress(child.stdio[3], onProgress, progressIntervalMs);
     let stdout = '';
     let stderr = '';
     let memoryFailure = false;
     let diskFull = false;
     let unsupportedCodec = false;
-    let timedOut = false;
+    let stopSource;
     let spawnError;
-    const stop = () => {
-      timedOut = true;
+    const stop = source => {
+      if (stopSource) return;
+      stopSource = source;
       child.kill('SIGKILL');
     };
-    const timer = setTimeout(stop, timeoutMs);
-    signal?.addEventListener('abort', stop, { once: true });
+    const abort = () => stop(signal.reason === 'shutdown' ? 'shutdown' : 'job_deadline');
+    const timer = setTimeout(() => stop(stage === 'ffmpeg' ? 'ffmpeg_deadline' : 'tool_deadline'), timeoutMs);
+    signal?.addEventListener('abort', abort, { once: true });
 
     child.stdout?.on('data', chunk => { stdout = (stdout + chunk).slice(0, 32768); });
     child.stderr.on('data', chunk => {
@@ -79,10 +117,12 @@ export function runTool(command, args, { stage, timeoutMs, captureOutput = false
     child.once('error', error => { spawnError = error; });
     child.once('close', (exitCode, exitSignal) => {
       clearTimeout(timer);
-      signal?.removeEventListener('abort', stop);
+      clearInterval(progress);
+      signal?.removeEventListener('abort', abort);
       const details = { exitCode, signal: exitSignal };
-      if (timedOut) {
-        reject(new VideoError(stage, 'timeout', `${command} timed out.`, details));
+      if (stopSource) {
+        reject(new VideoError(stage, stopSource === 'shutdown' ? 'shutdown' : 'timeout',
+          `${command} was stopped.`, { ...details, stopSource }));
       } else if (memoryFailure || spawnError?.code === 'ENOMEM') {
         reject(new VideoError(stage, 'memory_exhausted', `${command} ran out of memory.`, details));
       } else if (diskFull || spawnError?.code === 'ENOSPC') {
@@ -90,7 +130,9 @@ export function runTool(command, args, { stage, timeoutMs, captureOutput = false
       } else if (spawnError) {
         reject(new VideoError(stage, 'tool_start_failed', `${command} could not start.`, details));
       } else if (exitSignal) {
-        reject(new VideoError(stage, 'tool_terminated', `${command} was terminated.`, details));
+        const oomKillObserved = exitSignal === 'SIGKILL' && oomBefore !== undefined && oomKillCount() > oomBefore;
+        const reason = ['SIGSEGV', 'SIGABRT', 'SIGBUS', 'SIGILL', 'SIGFPE'].includes(exitSignal) ? 'tool_crashed' : 'tool_terminated';
+        reject(new VideoError(stage, reason, `${command} was terminated.`, { ...details, oomKillObserved }));
       } else if (exitCode !== 0) {
         const reason = stage === 'image' ? 'image_conversion_failed'
           : stage === 'validation' || unsupportedCodec ? 'unsupported_video' : 'encode_failed';
@@ -143,7 +185,7 @@ function mediaMetrics({ duration, video, audio, bitRate }, bytes) {
   };
 }
 
-export async function repackVideo(inputPath, outputPath, { statusVideo = false, signal } = {}) {
+export async function repackVideo(inputPath, outputPath, { statusVideo = false, signal, onProgress } = {}) {
   const input = await probeVideo(inputPath, statusVideo, signal);
   const maxSeconds = statusVideo ? Math.min(config.maxVideoSeconds, 60) : config.maxVideoSeconds;
   if (input.duration > maxSeconds) {
@@ -155,7 +197,8 @@ export async function repackVideo(inputPath, outputPath, { statusVideo = false, 
   const { args, videoMode, audioMode } = statusVideo
     ? buildStatusArgs(inputPath, outputPath, input)
     : { args: buildFfmpegArgs(inputPath, outputPath) };
-  await runTool('ffmpeg', args, { stage: 'ffmpeg', timeoutMs: config.ffmpegTimeoutMs, signal });
+  const ffmpegArgs = onProgress ? ['-progress', 'pipe:3', '-stats_period', '15', '-nostats', ...args] : args;
+  await runTool('ffmpeg', ffmpegArgs, { stage: 'ffmpeg', timeoutMs: config.ffmpegTimeoutMs, signal, onProgress });
 
   const output = await stat(outputPath);
   if (!output.size) throw new VideoError('ffmpeg', 'empty_output', 'FFmpeg produced an empty output file.');
