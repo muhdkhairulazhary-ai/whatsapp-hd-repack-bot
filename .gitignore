@@ -9,3 +9,5 @@ uploads/
 *.3gp
 .DS_Store
 npm-debug.log*
+# WhatsApp Web session credentials
+baileys-auth/
