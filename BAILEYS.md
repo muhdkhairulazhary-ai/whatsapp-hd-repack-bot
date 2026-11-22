@@ -41,3 +41,11 @@ The bot uses the protocol version bundled with Baileys 6.7.24. A registration ac
 | `link_accepted` | The signed account identity was accepted. The socket must complete login before `/health` shows `whatsappConnected: true`. |
 
 Report the last reason and numeric status code, with the approximate time of the attempt. Keep the pairing code, token, phone number, raw protocol data and credentials private. A notification processing warning during pairing is diagnostic context because Baileys uses that logger hook for all notifications.
+
+## Video limits and troubleshooting
+
+The Baileys bot accepts MP4 and MOV files up to **150 MB (150,000,000 bytes)** and **60 seconds**, including iPhone HEVC. For large clips or to preserve the source, send the video as a **document** in WhatsApp. The bot streams downloads to temporary storage, processes one video at a time, and uploads the MP4 from disk. WhatsApp can apply its own transfer limits before the bot receives a file.
+
+`BAILEYS_MAX_INPUT_BYTES` defaults to 150,000,000 and can lower that limit. `MAX_INPUT_BYTES` applies to the separate Cloud API webhook. `MAX_VIDEO_SECONDS` can lower the Baileys duration limit. The output stays subject to `MAX_OUTPUT_BYTES` (16 MiB by default). The encoder limits frame rate to 30 fps and uses H.264, AAC, yuv420p and aspect-ratio-preserving scaling without upscaling. Silent inputs get a silent AAC track.
+
+If processing fails, check the Render log for `stage` and `reason`. Failures identify validation, storage, download, FFmpeg, upload or cleanup. Timeouts, explicit memory allocation failures, and unexpected child termination have separate reasons. A child terminated by SIGKILL may indicate memory pressure. If Render kills the entire process, check its service events and memory graph around the failure time. The app does not log filenames, WhatsApp identifiers, media URLs, raw FFmpeg output or credentials.

@@ -13,7 +13,6 @@ import { createBaileysHandler } from './baileys-http.js';
 const log = pino({ level: process.env.LOG_LEVEL || 'info' });
 const authDir = process.env.BAILEYS_AUTH_DIR || './baileys-auth';
 const phone = (process.env.BAILEYS_PHONE_NUMBER || '').replace(/\D/g, '');
-const maxBytes = Number(process.env.MAX_INPUT_BYTES || 16 * 1024 * 1024);
 const port = Number(process.env.PORT || 3000);
 const pairingToken = process.env.PAIRING_ACCESS_TOKEN || '';
 // The library logs protocol payloads and identifiers at several log levels.
@@ -36,7 +35,7 @@ const connection = createConnectionManager({
     connectTimeoutMs: 30000,
     keepAliveIntervalMs: 30000,
   }),
-  onMessages: createMessageHandler({ downloadMediaMessage, maxBytes, log, privateLogger })
+  onMessages: createMessageHandler({ downloadMediaMessage, log, privateLogger })
 });
 
 const server = http.createServer(createBaileysHandler(connection, pairingToken));

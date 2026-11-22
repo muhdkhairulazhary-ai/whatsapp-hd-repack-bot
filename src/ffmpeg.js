@@ -2,80 +2,125 @@ import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import { config } from './config.js';
 
-export function buildFfmpegArgs(inputPath, outputPath) {
+export class VideoError extends Error {
+  constructor(stage, reason, message, details = {}) {
+    super(message);
+    this.stage = stage;
+    this.reason = reason;
+    this.details = details;
+  }
+}
+
+export function buildFfmpegArgs(inputPath, outputPath, { statusVideo = false, hasAudio = true } = {}) {
   return [
-    '-hide_banner', '-loglevel', 'error', '-y',
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+    ...(statusVideo ? ['-filter_threads', '1', '-threads', '1', '-protocol_whitelist', 'file', '-f', 'mov'] : []),
     '-i', inputPath,
-    '-map', '0:v:0', '-map', '0:a:0?',
+    ...(statusVideo && !hasAudio ? ['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo'] : []),
+    '-map', statusVideo ? '0:V:0' : '0:v:0', '-map', statusVideo && !hasAudio ? '1:a:0' : '0:a:0?',
     '-vf', `scale=w='min(${config.videoMaxWidth},iw)':h='min(${config.videoMaxWidth},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2`,
     '-c:v', 'libx264', '-preset', 'veryfast',
     '-crf', String(config.videoCrf),
     '-maxrate', config.videoMaxrate, '-bufsize', '3600k',
     '-pix_fmt', 'yuv420p',
+    ...(statusVideo ? ['-fpsmax', '30', '-x264-params', 'rc-lookahead=10', '-map_metadata', '-1'] : []),
     '-c:a', 'aac', '-b:a', config.videoAudioBitrate, '-ac', '2', '-ar', '44100',
+    ...(statusVideo && !hasAudio ? ['-shortest'] : []),
     '-movflags', '+faststart',
-    '-threads', '2',
+    ...(statusVideo ? ['-threads:v', '2', '-threads:a', '1'] : ['-threads', '2']),
     outputPath
   ];
 }
 
-function probeDuration(inputPath) {
+function runTool(command, args, { stage, timeoutMs, captureOutput = false }) {
   return new Promise((resolve, reject) => {
-    const child = spawn('ffprobe', [
-      '-v', 'error', '-show_entries', 'format=duration',
-      '-of', 'default=noprint_wrappers=1:nokey=1', inputPath
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { stdio: ['ignore', captureOutput ? 'pipe' : 'ignore', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    let memoryFailure = false;
+    let diskFull = false;
+    let unsupportedCodec = false;
+    let timedOut = false;
+    let spawnError;
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill('SIGKILL');
-      reject(new Error('Video inspection timed out. Try a shorter video.'));
-    }, 15000);
-    child.stdout.on('data', chunk => { stdout += chunk.toString(); });
-    child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-1000); });
-    child.once('error', error => { clearTimeout(timer); reject(new Error(`FFprobe could not start: ${error.message}`)); });
-    child.once('close', code => {
+    }, timeoutMs);
+
+    child.stdout?.on('data', chunk => { stdout = (stdout + chunk).slice(0, 32768); });
+    child.stderr.on('data', chunk => {
+      stderr = (stderr + chunk).slice(-4096);
+      memoryFailure ||= /cannot allocate memory|out of memory|failed to allocate|allocation failed/i.test(stderr);
+      diskFull ||= /no space left on device/i.test(stderr);
+      unsupportedCodec ||= /decoder .*not found|unknown decoder|unsupported codec/i.test(stderr);
+    });
+    child.once('error', error => { spawnError = error; });
+    child.once('close', (exitCode, signal) => {
       clearTimeout(timer);
-      const duration = Number(stdout.trim());
-      if (code !== 0 || !Number.isFinite(duration) || duration <= 0) {
-        reject(new Error(`Could not read video duration: ${stderr.slice(-500)}`));
-      } else resolve(duration);
+      const details = { exitCode, signal };
+      if (timedOut) {
+        reject(new VideoError(stage, 'timeout', `${command} timed out.`, details));
+      } else if (memoryFailure || spawnError?.code === 'ENOMEM') {
+        reject(new VideoError(stage, 'memory_exhausted', `${command} ran out of memory.`, details));
+      } else if (diskFull || spawnError?.code === 'ENOSPC') {
+        reject(new VideoError(stage, 'disk_full', 'Temporary storage is full.', details));
+      } else if (spawnError) {
+        reject(new VideoError(stage, 'tool_start_failed', `${command} could not start.`, details));
+      } else if (signal) {
+        reject(new VideoError(stage, 'tool_terminated', `${command} was terminated.`, details));
+      } else if (exitCode !== 0) {
+        const reason = stage === 'validation' || unsupportedCodec ? 'unsupported_video' : 'encode_failed';
+        reject(new VideoError(stage, reason, `${command} failed with exit code ${exitCode}.`, details));
+      } else {
+        resolve(stdout);
+      }
     });
   });
 }
 
-export async function repackVideo(inputPath, outputPath) {
-  const duration = await probeDuration(inputPath);
-  if (duration > config.maxVideoSeconds) {
-    throw new Error(`This video is longer than the ${config.maxVideoSeconds}-second limit. Please send a shorter clip.`);
+async function probeVideo(inputPath, statusVideo) {
+  const entries = statusVideo
+    ? 'format=duration:format_tags=major_brand:stream=codec_type:stream_disposition=attached_pic'
+    : 'format=duration';
+  const output = await runTool('ffprobe', [
+    '-v', 'error', ...(statusVideo ? ['-protocol_whitelist', 'file', '-f', 'mov'] : []),
+    '-show_entries', entries, '-of', 'json', inputPath
+  ], { stage: 'validation', timeoutMs: 15_000, captureOutput: true });
+  let metadata;
+  try {
+    metadata = JSON.parse(output);
+  } catch {
+    throw new VideoError('validation', 'unsupported_video', 'Could not read video metadata.');
+  }
+  const duration = Number(metadata.format?.duration);
+  const streams = metadata.streams || [];
+  const brand = metadata.format?.tags?.major_brand || '';
+  if (!Number.isFinite(duration) || duration <= 0 || (statusVideo &&
+      (/^(3g|mj2)/i.test(brand) || !streams.some(stream => stream.codec_type === 'video' && !stream.disposition?.attached_pic)))) {
+    throw new VideoError('validation', 'unsupported_video', 'Unsupported or damaged video.');
+  }
+  return { duration, hasAudio: streams.some(stream => stream.codec_type === 'audio') };
+}
+
+export async function repackVideo(inputPath, outputPath, { statusVideo = false } = {}) {
+  const { duration, hasAudio } = await probeVideo(inputPath, statusVideo);
+  const maxSeconds = statusVideo ? Math.min(config.maxVideoSeconds, 60) : config.maxVideoSeconds;
+  if (duration > maxSeconds) {
+    throw new VideoError('validation', 'duration_limit', `This video is longer than the ${maxSeconds}-second limit.`, {
+      durationSeconds: duration, limitSeconds: maxSeconds
+    });
   }
 
-  await new Promise((resolve, reject) => {
-    const child = spawn('ffmpeg', buildFfmpegArgs(inputPath, outputPath), { stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = '';
-    let settled = false;
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish(new Error('Video processing timed out. Try a shorter video.'));
-    }, config.ffmpegTimeoutMs);
-
-    function finish(error) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      error ? reject(error) : resolve();
-    }
-
-    child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-4000); });
-    child.once('error', error => finish(new Error(`FFmpeg could not start: ${error.message}`)));
-    child.once('close', code => {
-      if (code === 0) finish();
-      else finish(new Error(`FFmpeg failed (code ${code}): ${stderr.slice(-1200)}`));
-    });
+  await runTool('ffmpeg', buildFfmpegArgs(inputPath, outputPath, { statusVideo, hasAudio }), {
+    stage: 'ffmpeg', timeoutMs: config.ffmpegTimeoutMs
   });
 
   const output = await stat(outputPath);
-  if (!output.size) throw new Error('FFmpeg produced an empty output file.');
-  if (output.size > config.maxOutputBytes) throw new Error('Processed video is still too large to send. Try a shorter or smaller source video.');
+  if (!output.size) throw new VideoError('ffmpeg', 'empty_output', 'FFmpeg produced an empty output file.');
+  if (output.size > config.maxOutputBytes) {
+    throw new VideoError('ffmpeg', 'output_limit', 'Processed video is still too large to send.', {
+      outputBytes: output.size, limitBytes: config.maxOutputBytes
+    });
+  }
   return output.size;
 }
