@@ -6,6 +6,7 @@ import path from 'node:path';
 import { getWAUploadToServer, jidNormalizedUser } from '@whiskeysockets/baileys';
 import { commandReply } from './shelby-commands.js';
 import { detectImageFormat, processImage } from './shelby-image.js';
+import { HIGH_RES_TRANSCODE_HEADROOM, mediaMemoryLimit, memorySnapshot, timeStage } from './runtime-diagnostics.js';
 import { repackVideo, VideoError } from './ffmpeg.js';
 
 export const MAX_STATUS_INPUT_BYTES = 150_000_000;
@@ -18,8 +19,10 @@ const userMessages = {
   image_conversion_failed: 'Gambar gagal diproses. Fail mungkin rosak atau format ini tidak disokong.',
   image_pixel_limit: 'Resolusi gambar melebihi had 50 megapiksel.',
   image: 'Gambar gagal diproses. Cuba hantar fail JPEG, PNG atau HEIC lain.',
+  output_invalid: 'Video yang diproses tidak serasi. Sila cuba fail MP4 atau MOV lain.',
   unsupported_video: 'Format video tidak disokong atau fail rosak. Sila hantar fail MP4 atau MOV.',
   timeout: 'Masa pemprosesan tamat. Sila cuba video yang lebih kecil atau pendek.',
+  video_memory_budget: 'Pelayan tidak mempunyai memori mencukupi untuk menukar video beresolusi tinggi ini. Sila hantar versi 1080p.',
   memory_exhausted: 'Memori pelayan tidak mencukupi. Sila cuba video beresolusi lebih rendah.',
   tool_terminated: 'Pemprosesan video terhenti. Sila cuba video beresolusi lebih rendah.',
   disk_full: 'Storan sementara penuh. Sila cuba lagi kemudian.',
@@ -54,7 +57,8 @@ export function createMessageHandler({
   jobTimeoutMs = Number(process.env.BOT_MEDIA_JOB_TIMEOUT_MS ?? 900_000),
   maxBytes = Number(process.env.BAILEYS_MAX_INPUT_BYTES ?? MAX_STATUS_INPUT_BYTES),
   maxOutputBytes = Number(process.env.BAILEYS_MAX_OUTPUT_BYTES ?? MAX_STATUS_INPUT_BYTES),
-  downloadTimeoutMs = DOWNLOAD_TIMEOUT_MS
+  downloadTimeoutMs = DOWNLOAD_TIMEOUT_MS,
+  readMemory = memorySnapshot
 }) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_STATUS_INPUT_BYTES) {
     throw new Error('BAILEYS_MAX_INPUT_BYTES must be an integer between 1 and 150000000.');
@@ -69,6 +73,12 @@ export function createMessageHandler({
   ]) {
     if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(`Invalid ${name}`);
   }
+  const memoryLimit = mediaMemoryLimit(readMemory());
+  const workers = Math.min(concurrency, Math.max(1,
+    Math.floor((memoryLimit - 128 * 1024 ** 2) / HIGH_RES_TRANSCODE_HEADROOM)));
+  if (workers < concurrency) {
+    log.info?.({ requestedWorkers: concurrency, workers, memoryLimitBytes: memoryLimit }, 'Media concurrency limited by memory');
+  }
   const seen = new Set();
   const accepted = new Set();
   const queue = [];
@@ -79,7 +89,7 @@ export function createMessageHandler({
     sock.sendMessage(jid, { text })).catch(() => {});
 
   function pump() {
-    while (!stopping && active.size < concurrency && queue.length) {
+    while (!stopping && active.size < workers && queue.length) {
       const job = queue.shift();
       const controller = new AbortController();
       const task = processMedia(job, controller).catch(() => {
@@ -96,6 +106,7 @@ export function createMessageHandler({
 
   async function processMedia({ sock, jid, msg, media, kind }, controller) {
     const started = Date.now();
+    const timing = fields => log.info?.(fields, 'Media stage timing');
     let dir;
     let bytes = 0;
     let stage = 'validation';
@@ -122,16 +133,18 @@ export function createMessageHandler({
         downloadTimedOut = true;
         controller.abort('download_deadline');
       }, downloadTimeoutMs);
-      const mediaStream = await downloadMediaMessage(msg, 'stream', { options: { signal } }, {
-        logger: privateLogger, reuploadRequest: sock.updateMediaMessage
+      await timeStage('download', timing, async () => {
+        const mediaStream = await downloadMediaMessage(msg, 'stream', { options: { signal } }, {
+          logger: privateLogger, reuploadRequest: sock.updateMediaMessage
+        });
+        await pipeline(mediaStream, async function* limit(source) {
+          for await (const chunk of source) {
+            bytes += chunk.length;
+            if (bytes > maxBytes) throw rejectSize();
+            yield chunk;
+          }
+        }, createWriteStream(input, { mode: 0o600 }), { signal });
       });
-      await pipeline(mediaStream, async function* limit(source) {
-        for await (const chunk of source) {
-          bytes += chunk.length;
-          if (bytes > maxBytes) throw rejectSize();
-          yield chunk;
-        }
-      }, createWriteStream(input, { mode: 0o600 }), { signal });
 
       clearTimeout(downloadTimer);
       const imageFormat = kind === 'video' ? null : await detectImageFormat(input);
@@ -141,11 +154,11 @@ export function createMessageHandler({
       let mimetype = 'video/mp4';
       let metrics;
       if (image) {
-        const result = await processImage(input, dir, imageFormat, signal);
+        const result = await timeStage('image', timing, () => processImage(input, dir, imageFormat, signal));
         ({ path: output, mimetype, metrics } = result);
       } else {
         metrics = await repackVideo(input, output, {
-          statusVideo: true, signal,
+          statusVideo: true, signal, onStage: timing, inputBytes: bytes, readMemory,
           onProgress: fields => log.info?.(fields, 'FFmpeg progress')
         });
       }
@@ -168,23 +181,27 @@ export function createMessageHandler({
           return result;
         };
       }
-      await sock.sendMessage(jid, {
+      await timeStage('upload', timing, () => sock.sendMessage(jid, {
         [image ? 'image' : 'video']: { url: output },
         mimetype,
         // Shelby+ already bounded conversion. Skip Baileys' second full-media decode.
         jpegThumbnail: Buffer.alloc(0),
         width: metrics.output.width,
         height: metrics.output.height
-      }, options);
+      }, options));
+      log.info?.({ stage: 'total', elapsedMs: Date.now() - started, outcome: 'ok' }, 'Media job timing');
       try {
         await accounts?.record(jid, image ? 'image' : 'video');
       } catch {
         log.error({ stage: 'account', reason: 'statistics_write_failed' }, 'Account update failed');
       }
     } catch (error) {
-      const failure = failureDetails(error, stage, downloadTimedOut || signal.aborted);
+      const failure = signal.reason === 'shutdown' && !(error instanceof VideoError)
+        ? { stage, reason: 'shutdown', stopSource: 'shutdown' }
+        : failureDetails(error, stage, downloadTimedOut || signal.aborted);
       controller.abort();
       log.error({ ...failure, downloadedBytes: bytes, elapsedMs: Date.now() - started }, 'Media processing failed');
+      log.info?.({ stage: 'total', elapsedMs: Date.now() - started, outcome: 'failed' }, 'Media job timing');
       if (!stopping) await sendText(sock, jid, `❌ ${replyFor(failure)}`);
     } finally {
       clearTimeout(jobTimer);
@@ -235,11 +252,11 @@ export function createMessageHandler({
         await sendText(sock, jid, '❌ Format fail tidak disokong. Hantar MP4, MOV, JPEG, PNG atau HEIC.');
         continue;
       }
-      if (active.size >= concurrency && queue.length >= queueCapacity) {
+      if (active.size >= workers && queue.length >= queueCapacity) {
         await sendText(sock, jid, '⏳ Barisan pemprosesan penuh. Sila hantar semula fail sebentar lagi.');
         continue;
       }
-      const waiting = active.size >= concurrency;
+      const waiting = active.size >= workers;
       if (key) accepted.add(key);
       jobs.push(new Promise(done => queue.push({ sock, jid, msg, media, kind, key, done })));
       pump();
@@ -248,6 +265,7 @@ export function createMessageHandler({
     await Promise.all(jobs);
   }
 
+  handleMessages.snapshot = () => ({ activeJobs: active.size, queuedJobs: queue.length });
   handleMessages.stop = async () => {
     stopping = true;
     for (const job of queue.splice(0)) {

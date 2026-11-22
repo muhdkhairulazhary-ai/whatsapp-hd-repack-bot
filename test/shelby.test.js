@@ -106,7 +106,7 @@ test('JPEG orientation, PNG transparency and HEIC decoding preserve size and ret
   assert.deepEqual((await readdir(directory)).sort(), ['accounts', 'jpeg.jpg', 'png.png', 'reply']);
 });
 
-test('bounded queue processes one job at a time, ignores duplicates and its own messages', async t => {
+test('512 MiB clamps a configured multi-worker queue, ignores duplicates and its own messages', async t => {
   const directory = await temporary(t);
   const png = path.join(directory, 'test.png');
   await run('convert', ['-size', '20x20', 'xc:blue', png]);
@@ -118,7 +118,8 @@ test('bounded queue processes one job at a time, ignores duplicates and its own 
   const firstStarted = new Promise(resolve => { startFirst = resolve; });
   const firstGate = new Promise(resolve => { releaseFirst = resolve; });
   const handler = createMessageHandler({
-    queueCapacity: 1, concurrency: 1, tempRoot: directory, log: logger,
+    queueCapacity: 1, concurrency: 4, tempRoot: directory, log: logger,
+    readMemory: () => ({ cgroupLimitBytes: 512 * 1024 ** 2 }),
     async downloadMediaMessage(msg) {
       calls.push(msg.key.id);
       if (msg.key.id === 'first') {
@@ -237,4 +238,40 @@ test('Baileys credentials survive storage reload and network reconnect without r
   assert.equal(manager.requestPairing().reason, 'logged_out');
   assert.equal((await useMultiFileAuthState(directory)).state.creds.me.id, jid);
   await manager.stop();
+});
+
+test('service shutdown logs SIGTERM and cancels a live job without claiming OOM', async t => {
+  const { createShutdown } = await import('../src/runtime-diagnostics.js');
+  const directory = await temporary(t);
+  const records = [];
+  const listener = fields => records.push(fields);
+  let begin;
+  const started = new Promise(resolve => { begin = resolve; });
+  const media = createMessageHandler({
+    tempRoot: directory,
+    log: { info: listener, error: listener },
+    async downloadMediaMessage() { begin(); return new Readable({ read() {} }); }
+  });
+  const job = media({ sendMessage: async () => {} }, event('shutdown-private', { videoMessage: {} }));
+  await started;
+  let serverClosed = 0;
+  let connectionStopped = 0;
+  const stop = createShutdown({
+    server: { close() { serverClosed++; } },
+    connection: { async stop() { connectionStopped++; } },
+    media, log: { info: listener },
+    snapshot: () => ({ rssBytes: 100, oomKills: 2 })
+  });
+  const stopping = stop('SIGTERM');
+  assert.equal(stop('SIGINT'), stopping);
+  await Promise.all([job, stopping]);
+  assert.equal(serverClosed, 1);
+  assert.equal(connectionStopped, 1);
+  assert.equal(records.find(record => record.signal)?.activeJobs, 1);
+  assert.equal(records.at(-1).signal, 'SIGTERM');
+  assert.equal(records.at(-1).oomKillCounterChanged, false);
+  assert.ok(records.some(record => record.reason === 'shutdown'));
+  assert.ok(records.some(record => record.stage === 'download' && record.outcome === 'failed'));
+  assert.doesNotMatch(JSON.stringify(records), /shutdown-private/);
+  assert.deepEqual(await readdir(directory), []);
 });

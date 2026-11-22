@@ -24,11 +24,12 @@ test('Baileys video handler streams, repacks, replies and cleans up', async t =>
   const sent = [];
   const errors = [];
   const recorded = [];
+  const stages = [];
   const handler = createMessageHandler({
     accounts: { async record(jid, kind) { recorded.push([jid, kind]); } },
     maxBytes: input.length,
     tempRoot,
-    log: { error: message => errors.push(message) },
+    log: { error: message => errors.push(message), info: fields => { if (fields.stage) stages.push(fields); } },
     async downloadMediaMessage(msg, type) {
       assert.equal(type, 'stream');
       if (msg.key.id === 'oversize') return Readable.from([input, Buffer.from('extra')]);
@@ -49,6 +50,8 @@ test('Baileys video handler streams, repacks, replies and cleans up', async t =>
   assert.deepEqual((await readdir(tempRoot)).sort(), ['source.mov', 'reply.mp4'].sort());
   const [reply] = sent.filter(message => message.video);
   assert.equal(Object.hasOwn(reply, 'caption'), false);
+  assert.deepEqual(stages.map(fields => fields.stage), ['download', 'ffprobe', 'ffmpeg', 'verification', 'upload', 'total']);
+  assert.ok(stages.every(fields => fields.outcome === 'ok' && fields.elapsedMs >= 0));
   assert.equal(reply.mimetype, 'video/mp4');
   assert.equal(reply.jid, 'test@s.whatsapp.net');
   const { stdout } = await run('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,pix_fmt', '-of', 'json', output]);
@@ -230,7 +233,7 @@ test('compatible 1080×1920 60 fps MP4 is copied packet-for-packet and logged sa
     }
   } };
   const handler = createMessageHandler({
-    tempRoot, log: { info: fields => logs.push(fields), error: fields => errors.push(fields) },
+    tempRoot, log: { info: fields => { if (fields.input) logs.push(fields); }, error: fields => errors.push(fields) },
     downloadMediaMessage: async () => Readable.from([original])
   });
   await handler(sock, videoEvent('private-message-id'));
@@ -263,7 +266,7 @@ test('1080×1920 HEVC conversion keeps frame rate and rejects over-limit output 
   const sent = [];
   const handler = createMessageHandler({
     tempRoot, maxOutputBytes: 1,
-    log: { info: fields => logs.push(fields), error: fields => errors.push(fields) },
+    log: { info: fields => { if (fields.input) logs.push(fields); }, error: fields => errors.push(fields) },
     downloadMediaMessage: async () => Readable.from([original])
   });
   await handler({ sendMessage: async (jid, message) => sent.push(message) }, videoEvent('too-big-output'));
@@ -299,4 +302,141 @@ test('FFmpeg progress only reports numeric metrics and distinguishes job deadlin
   await assert.rejects(runTool('sh', ['-c', 'ulimit -c 0; kill -SEGV $$'], {
     stage: 'ffmpeg', timeoutMs: 1000
   }), error => error.reason === 'tool_crashed' && error.details.signal === 'SIGSEGV');
+});
+
+test('a rotated compatible MOV is remuxed with its display matrix and audio offset preserved', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'wa-rotate-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const raw = path.join(dir, 'raw.mov');
+  const rotated = path.join(dir, 'rotated.mov');
+  const output = path.join(dir, 'out.mp4');
+  await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=160x96:rate=30',
+    '-itsoffset', '0.18', '-f', 'lavfi', '-i', 'sine=frequency=500', '-t', '0.8',
+    '-c:v', 'libx264', '-c:a', 'aac', raw]);
+  const { stdout: help } = await run('ffmpeg', ['-hide_banner', '-h', 'full'], { maxBuffer: 2 ** 22 });
+  const metadata = help.includes('-display_rotation');
+  await run('ffmpeg', ['-v', 'error', ...(metadata ? ['-display_rotation', '90'] : []),
+    '-i', raw, '-c', 'copy', ...(!metadata ? ['-metadata:s:v:0', 'rotate=90'] : []), rotated]);
+
+  const { repackVideo } = await import('../src/ffmpeg.js');
+  const timings = [];
+  const metrics = await repackVideo(rotated, output, { statusVideo: true, onStage: stage => timings.push(stage) });
+  assert.equal(metrics.videoMode, 'copy');
+  assert.equal(metrics.audioMode, 'copy');
+  assert.equal(metrics.output.width, 96);
+  assert.equal(metrics.output.height, 160);
+  assert.deepEqual(timings.map(stage => stage.stage), ['ffprobe', 'ffmpeg', 'verification']);
+  async function starts(file) {
+    const { stdout } = await run('ffprobe', ['-v', 'error', '-show_entries', 'stream=start_time:stream_side_data=rotation', '-of', 'json', file]);
+    const [video, audio] = JSON.parse(stdout).streams;
+    return { rotation: video.side_data_list[0].rotation, offset: Number(audio.start_time) - Number(video.start_time) };
+  }
+  const inputTiming = await starts(rotated);
+  const outputTiming = await starts(output);
+  assert.equal(outputTiming.rotation, 90);
+  assert.ok(Math.abs(inputTiming.offset - outputTiming.offset) < 0.01);
+
+  await run('ffmpeg', ['-v', 'error', '-y', '-i', raw, '-c:v', 'libx265',
+    '-x265-params', 'pools=none:frame-threads=1:log-level=error', '-c:a', 'copy', raw + '.mov']);
+  await run('ffmpeg', ['-v', 'error', '-y', ...(metadata ? ['-display_rotation', '90'] : []),
+    '-i', raw + '.mov', '-c', 'copy', ...(!metadata ? ['-metadata:s:v:0', 'rotate=90'] : []), rotated]);
+  const encoded = await repackVideo(rotated, output, { statusVideo: true });
+  assert.equal(encoded.videoMode, 'encode');
+  assert.equal(encoded.output.width, 96);
+  assert.equal(encoded.output.height, 160);
+  assert.equal(encoded.output.fps, '30/1');
+});
+
+test('H.264 4:4:4 is converted and a broken remux falls back to encoding', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'wa-verify-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const input = path.join(dir, 'input.mp4');
+  const output = path.join(dir, 'out.mp4');
+  const fixture = pixFmt => run('ffmpeg', ['-v', 'error', '-y', '-filter_threads', '1',
+    '-f', 'lavfi', '-i', 'testsrc2=size=128x96:rate=25', '-f', 'lavfi', '-i', 'sine=frequency=700',
+    '-t', '0.5', '-c:v', 'libx264', '-pix_fmt', pixFmt, '-c:a', 'aac', input]);
+  const { repackVideo } = await import('../src/ffmpeg.js');
+  await fixture('yuv444p');
+  const recoded = await repackVideo(input, output, { statusVideo: true });
+  assert.equal(recoded.videoMode, 'encode');
+  assert.equal(recoded.audioMode, 'copy');
+  assert.equal(recoded.output.width, 128);
+
+  await fixture('yuv420p');
+  const { stdout: actualFfmpeg } = await run('sh', ['-c', 'command -v ffmpeg']);
+  const pathBefore = process.env.PATH;
+  t.after(() => { process.env.PATH = pathBefore; });
+  process.env.PATH = `${dir}:${pathBefore}`;
+  await writeFile(path.join(dir, 'ffmpeg'), `#!/bin/sh
+copy=no
+for argument do
+  if [ "$argument" = copy ]; then copy=yes; fi
+  output=$argument
+done
+if [ "$copy" = yes ]; then printf 'invalid MP4' > "$output"; exit 0; fi
+exec "${actualFfmpeg.trim()}" "$@"
+`, { mode: 0o700 });
+  const timings = [];
+  const repaired = await repackVideo(input, output, { statusVideo: true, onStage: fields => timings.push(fields) });
+  assert.equal(repaired.videoMode, 'encode');
+  assert.deepEqual(timings.filter(timing => timing.stage === 'verification').map(timing => timing.outcome), ['failed', 'ok']);
+  await writeFile(path.join(dir, 'ffmpeg'), '#!/bin/sh\nfor argument do output=$argument; done\nprintf invalid > "$output"\n');
+  await assert.rejects(repackVideo(input, output, { statusVideo: true }), { stage: 'verification', reason: 'output_invalid' });
+});
+
+test('512 MiB refuses UHD HEVC before encoding and keeps UHD Smart Copy with an exact upload cap', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'wa-uhd-budget-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const hevc = path.join(dir, 'uhd.mov');
+  const avc = path.join(dir, 'compatible.mp4');
+  const fixture = ['-v', 'error', '-f', 'lavfi', '-i', 'color=size=3840x2160:rate=10',
+    '-f', 'lavfi', '-i', 'sine=frequency=500', '-t', '0.2', '-threads:v', '1', '-c:a', 'aac'];
+  await run('ffmpeg', [...fixture, '-c:v', 'libx265', '-preset', 'ultrafast',
+    '-x265-params', 'pools=none:frame-threads=1:log-level=error', hevc]);
+  await run('ffmpeg', [...fixture, '-c:v', 'libx264', '-preset', 'ultrafast', avc]);
+
+  const mib = 1024 ** 2;
+  const readMemory = () => ({ cgroupLimitBytes: 512 * mib, cgroupBytes: 128 * mib, rssBytes: 80 * mib });
+  const { repackVideo } = await import('../src/ffmpeg.js');
+  const output = path.join(dir, 'copy.mp4');
+  const metrics = await repackVideo(avc, output, { statusVideo: true, readMemory });
+  assert.equal(metrics.videoMode, 'copy');
+  assert.equal(metrics.output.width, 3840);
+  assert.equal(metrics.output.height, 2160);
+
+  const sent = [];
+  const errors = [];
+  const stages = [];
+  const sock = { sendMessage: async (_, message) => { sent.push(message); } };
+  const create = maxOutputBytes => createMessageHandler({
+    tempRoot: dir, maxOutputBytes, readMemory,
+    log: { info: fields => { if (fields.stage) stages.push(fields.stage); }, error: fields => errors.push(fields) },
+    async downloadMediaMessage(msg) {
+      return Readable.from([await readFile(msg.key.id === 'uhd-hevc' ? hevc : avc)]);
+    }
+  });
+  const send = (handler, id) => handler(sock, videoEvent(id));
+  await send(create(metrics.output.bytes), 'uhd-hevc');
+  assert.equal(errors.at(-1).reason, 'video_memory_budget');
+  assert.match(sent.at(-1).text, /1080p/);
+  assert.equal(stages.includes('ffmpeg'), false);
+  await send(create(metrics.output.bytes), 'exact-cap');
+  assert.equal(sent.filter(message => message.video).length, 1);
+  await send(create(metrics.output.bytes - 1), 'over-cap');
+  assert.equal(sent.filter(message => message.video).length, 1);
+  assert.equal(errors.at(-1).reason, 'output_limit');
+  assert.equal(errors.at(-1).outputBytes, metrics.output.bytes);
+  assert.deepEqual((await readdir(dir)).sort(), ['compatible.mp4', 'copy.mp4', 'uhd.mov']);
+
+  // A failed UHD remux must not fall through to a memory-unsafe video encode.
+  const previousPath = process.env.PATH;
+  t.after(() => { process.env.PATH = previousPath; });
+  await writeFile(path.join(dir, 'ffmpeg'), '#!/bin/sh\nfor argument do output=$argument; done\nprintf invalid > "$output"\n',
+    { mode: 0o700 });
+  process.env.PATH = `${dir}:${previousPath}`;
+  const attempts = [];
+  await assert.rejects(repackVideo(avc, output, {
+    statusVideo: true, readMemory, onStage: fields => attempts.push(fields.stage)
+  }), { reason: 'video_memory_budget' });
+  assert.deepEqual(attempts, ['ffprobe', 'ffmpeg', 'verification']);
 });
