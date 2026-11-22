@@ -52,15 +52,16 @@ async function start() {
   let pairingAttempted = false;
   sock.ev.on('creds.update', saveCreds);
   let pairingRequested = false;
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-    // A QR event means WhatsApp has issued a login challenge; wait for that
-    // rather than guessing when the websocket will be ready.
-    if (!state.creds.registered && phone && pairingToken && qr && !pairingAttempted && !socketClosed) {
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
+    // Request a phone-number pairing code when the websocket is connected.
+    // A QR event is not required for phone-number pairing.
+    if (!state.creds.registered && phone && pairingToken && !pairingAttempted && !socketClosed && connection === 'connecting') {
       pairingAttempted = true;
-      pairingTimer = setTimeout(async () => {
-        pairingTimer = null;
-        if (socketClosed || sock.ws?.readyState !== 1) {
-          log.warn('Pairing skipped: socket closed before request');
+      const attemptPairing = async (retries = 0) => {
+        if (socketClosed) return;
+        if (sock.ws?.readyState !== 1) {
+          if (retries < 20) pairingTimer = setTimeout(() => attemptPairing(retries + 1), 500);
+          else log.warn('Pairing not attempted: websocket never became ready');
           return;
         }
         try {
@@ -73,7 +74,8 @@ async function start() {
         } catch (err) {
           log.warn({ message: err?.message, statusCode: err?.output?.statusCode }, 'Pairing request unsuccessful');
         }
-      }, 1000);
+      };
+      pairingTimer = setTimeout(() => attemptPairing(), 500);
     }
     if (connection === 'open') { connected = true; pairingCode = null; log.info('WhatsApp linked'); }
     if (connection === 'close') {
