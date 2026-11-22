@@ -26,3 +26,5 @@ jobs:
         run: npm test
       - name: Build Docker image
         run: docker build -t whatsapp-hd-baileys:test .
+      - name: Test media processing in the Docker image
+        run: docker run --rm whatsapp-hd-baileys:test node --test test/baileys-media.test.js
