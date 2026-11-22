@@ -238,3 +238,39 @@ test('Baileys credentials survive storage reload and network reconnect without r
   assert.equal((await useMultiFileAuthState(directory)).state.creds.me.id, jid);
   await manager.stop();
 });
+
+test('service shutdown logs SIGTERM and cancels a live job without claiming OOM', async t => {
+  const { createShutdown } = await import('../src/runtime-diagnostics.js');
+  const directory = await temporary(t);
+  const records = [];
+  const listener = fields => records.push(fields);
+  let begin;
+  const started = new Promise(resolve => { begin = resolve; });
+  const media = createMessageHandler({
+    tempRoot: directory,
+    log: { info: listener, error: listener },
+    async downloadMediaMessage() { begin(); return new Readable({ read() {} }); }
+  });
+  const job = media({ sendMessage: async () => {} }, event('shutdown-private', { videoMessage: {} }));
+  await started;
+  let serverClosed = 0;
+  let connectionStopped = 0;
+  const stop = createShutdown({
+    server: { close() { serverClosed++; } },
+    connection: { async stop() { connectionStopped++; } },
+    media, log: { info: listener },
+    snapshot: () => ({ rssBytes: 100, oomKills: 2 })
+  });
+  const stopping = stop('SIGTERM');
+  assert.equal(stop('SIGINT'), stopping);
+  await Promise.all([job, stopping]);
+  assert.equal(serverClosed, 1);
+  assert.equal(connectionStopped, 1);
+  assert.equal(records.find(record => record.signal)?.activeJobs, 1);
+  assert.equal(records.at(-1).signal, 'SIGTERM');
+  assert.equal(records.at(-1).oomKillCounterChanged, false);
+  assert.ok(records.some(record => record.reason === 'shutdown'));
+  assert.ok(records.some(record => record.stage === 'download' && record.outcome === 'failed'));
+  assert.doesNotMatch(JSON.stringify(records), /shutdown-private/);
+  assert.deepEqual(await readdir(directory), []);
+});

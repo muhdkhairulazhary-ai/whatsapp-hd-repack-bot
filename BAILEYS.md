@@ -5,7 +5,7 @@ The feature branch runs a WhatsApp Linked Devices companion using Baileys. The C
 ## Deploy on Render
 
 1. Review and merge the fix PR into `feature/baileys-whatsapp-bot` in Safari. If you want a manual rollout and this branch has Auto-Deploy enabled, disable Auto-Deploy before merging.
-2. In Render, open `whatsapp-hd-repack-bot-1`. Verify the service uses that feature branch, one instance, and `/health` as the health check path. The Docker image includes FFmpeg, FFprobe and ImageMagick and defaults to `npm run start:baileys`. If the service already uses Docker, keep that runtime.
+2. In Render, open `whatsapp-hd-repack-bot-1`. Verify the service uses that feature branch, one instance, and `/health` as the health check path. The Docker image includes FFmpeg, FFprobe and ImageMagick and defaults to `node src/baileys-server.js` so Node receives container signals directly. If the service already uses Docker, keep that runtime.
 3. Verify that `BAILEYS_PHONE_NUMBER` contains the country code and number as digits, and that `PAIRING_ACCESS_TOKEN` is a long, private random secret. Rotate any previously exposed token. Keep `BAILEYS_AUTH_DIR` pointing to the existing session directory if it holds your linked session.
 4. Choose **Manual Deploy → Deploy latest commit** when ready. Open the service HTTPS URL with `/health` appended. `ok: true` means the HTTP process is alive. `whatsappConnected: true` appears after WhatsApp login completes.
 
@@ -79,7 +79,7 @@ The Baileys bot accepts MP4 and MOV files up to **150 MB (150,000,000 bytes)** a
 
 FFprobe reads the source and output dimensions, frame rate, duration, codecs and bitrate. For compatible H.264/yuv420p video and AAC-LC audio, the bot remuxes the original streams into a fast-start MP4. If only one stream needs encoding, the compatible stream is copied. This preserves the original compressed media and generally keeps the output close to the input size, subject to container overhead and other tracks. Silent inputs get a silent AAC track.
 
-When video needs encoding, FFmpeg uses H.264 CRF 18 with the `superfast` preset for HEVC and `veryfast` for other inputs, bounded decode/encode threads and lookahead, and source frame timestamps. It keeps the source resolution and aspect ratio, with no automatic downscaling or FPS cap. An odd encoded dimension may gain one padding pixel to support yuv420p. Re-encoding can change the size substantially, especially between different codecs. The bot applies neither a target bitrate nor padding bytes to match a file size.
+When video needs encoding, FFmpeg uses H.264 CRF 18 with the `ultrafast` preset for HEVC and `veryfast` for other inputs, one video decode thread, one video encode thread, and bounded lookahead, and source frame timestamps. It keeps the source resolution and aspect ratio, with no automatic downscaling or FPS cap. An odd encoded dimension may gain one padding pixel to support yuv420p. Re-encoding can change the size substantially, especially between different codecs. The bot applies neither a target bitrate nor padding bytes to match a file size.
 
 `BAILEYS_MAX_OUTPUT_BYTES` defaults to 150,000,000. This is the bot's upload guard. If an output exceeds it, the bot replies in Malay and leaves the resolution and encoding strategy alone. Baileys 6.7.24 streams the encrypted file to WhatsApp's media hosts without setting a numerical Axios size limit. The hosts can still reject transfers and Baileys can report a generic upload failure after trying them. WhatsApp's advertised 2 GB file-sharing allowance is for file sharing and does not establish a limit for inline video uploads or WhatsApp Status. **WhatsApp may recompress clips posted to Status.** [Baileys uploader](https://github.com/WhiskeySockets/Baileys/blob/v6.7.24/src/Utils/messages-media.ts) · [WhatsApp file-sharing announcement](https://blog.whatsapp.com/reactions-2gb-file-sharing-512-groups)
 
@@ -122,3 +122,30 @@ Images are validated by content and decoded with ImageMagick. The Docker build s
 In Render logs, look for `auth_lease_acquired`, `stored_auth_available`, and `whatsapp_open` in that order. `auth_storage_busy` means the old process still owns the lease or its lease is waiting to expire. Recovery retries with backoff while keeping the encrypted state. A successful storage recovery still leaves the socket its own reconnect budget.
 
 After WhatsApp opens, `offline_notifications_received` marks completion of the server's offline batch and `first_notify_dispatched` shows that the app received a message batch. If Baileys still has a buffered batch 30 seconds after open, the bot flushes it and logs `startup_event_buffer_flushed`. The bot accepts fresh offline deliveries from the current recovery window and ignores older history. If a fresh `.menu` still receives no reply, check for the message-receive or init-query warning and the numeric status code. These logs exclude message contents, identifiers and auth data.
+
+
+### Video performance and shutdown
+
+The video path checks both streams and display geometry before copying. A compatible rotation matrix is preserved without rotating every decoded frame. The output probe checks MP4 branding, H.264/AAC compatibility, dimensions, rotation, sample aspect ratio, frame rate, stream duration and the relative audio start time. A failed remux or failed compatibility check can trigger one encoding fallback. Deadline, memory and cancellation failures do not trigger another conversion. The output size guard still applies before upload.
+
+Compare `Media stage timing` for `download`, `ffprobe`, `ffmpeg`, `verification` and `upload`. `Media job timing` reports total active time, excluding queue wait. No path, JID, filename or media URL is included. Download and upload times vary by WhatsApp host and network. An app `SIGTERM` records shutdown, job counts, and available cgroup memory counters, then cancels work, cleans temporary files and drains connection shutdown. A SIGTERM does not establish OOM. The reported 22:25 MYT termination had no corresponding visible Render event, and its source remains unknown.
+
+#### One-core benchmark
+
+Synthetic 60 fps MOV fixtures used FFmpeg `testsrc2`, HEVC Main 10 and AAC. The 1080×1920 fixture runs for five seconds and the 3840×2160 fixture for three seconds. The comparator was feature commit `e4f9475` versus this implementation. Processes ran on one pinned logical CPU with FFmpeg 7.1.5. The times below include local input/output probes, FFmpeg and Node startup, without WhatsApp transfers. Peak RSS is the largest process's RSS, not the total service memory. These were single runs on the development host, without Render's shared CPU quota or a 512 MiB memory cap.
+
+| Input | Local time before → after | Wall-time reduction | Output resolution and FPS | MP4 size before → after | Peak RSS before → after | CPU seconds before → after |
+| --- | ---: | ---: | --- | ---: | ---: | ---: |
+| Portrait HEVC | 9.951 → 6.281 s | 36.9% | 1080×1920 at 60 fps | 14.18 → 18.81 MB | 296 → 179 MiB | 9.93 → 6.27 |
+| UHD HEVC | 26.276 → 17.346 s | 34.0% | 3840×2160 at 60 fps | 26.48 → 40.01 MB | 848 → 583 MiB | 26.26 → 17.33 |
+| Compatible H.264/AAC | 0.509 → 0.443 s | Small single-run difference | 1080×1920 at 60 fps | 14.18 → 14.18 MB | 40 → 40 MiB | 0.51 → 0.44 |
+
+Codec output was H.264/AAC in all cases. A separate encoder-only CRF 18 comparison used one decode and one encode thread for all three presets. SSIM is against the source converted to 8-bit 4:2:0 for measurement. Results are fixture-specific.
+
+| Preset | Portrait time / size / SSIM | UHD time / size / SSIM |
+| --- | --- | --- |
+| ultrafast | 5.828 s / 18.81 MB / 0.99597 | 17.063 s / 40.01 MB / 0.99673 |
+| superfast | 9.574 s / 14.18 MB / 0.99662 | 24.939 s / 26.48 MB / 0.99737 |
+| veryfast | 13.115 s / 10.59 MB / 0.99614 | 31.858 s / 22.62 MB / 0.99714 |
+
+`ultrafast` was selected for HEVC because it used less CPU time and memory on both fixtures at similar measured similarity. Its larger files can take longer to upload or hit the existing output cap. The UHD test still exceeded Render Free's 512 MiB RAM by itself. For heavy 4K sources the bot can still time out, be terminated, or reject an oversized output. The original 39.6 MB MOV and live Render/WhatsApp transfers were unavailable in this benchmark. The under-two-minute production target remains unverified. [Render instance specifications](https://render.com/pricing)

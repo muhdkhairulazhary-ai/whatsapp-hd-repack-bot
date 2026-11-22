@@ -11,6 +11,7 @@ import { createMessageHandler } from './baileys-media.js';
 import { createConnectionManager } from './baileys-connection.js';
 import { createBaileysDiagnosticLogger, pairingBrowser, requestConfirmedPairingCode } from './baileys-pairing.js';
 import { createRemoteAuthLoader } from './baileys-remote-auth.js';
+import { createShutdown } from './runtime-diagnostics.js';
 import { createBaileysHandler } from './baileys-http.js';
 
 const log = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -52,9 +53,7 @@ const server = http.createServer(createBaileysHandler(connection, pairingToken))
 server.listen(port, '0.0.0.0', () => log.info({ port, bot: branding.fullName }, 'Health server listening'));
 void connection.start();
 
+const shutdown = createShutdown({ server, media: onMessages, connection, log });
 for (const signal of ['SIGTERM', 'SIGINT']) {
-  process.once(signal, () => {
-    server.close();
-    void Promise.all([onMessages.stop(), connection.stop()]);
-  });
+  process.on(signal, () => { void shutdown(signal); });
 }
