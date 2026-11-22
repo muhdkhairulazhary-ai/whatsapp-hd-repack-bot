@@ -8,6 +8,18 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 const phone = '12345678901';
 const code = 'EXAMPLE1';
 const token = 'test-only-token';
+const reference = Buffer.from('test-reference');
+const phoneEvent = 'CB:notification,type:link_code_companion_reg';
+
+function phoneNotification(ref = reference) {
+  return {
+    tag: 'notification', attrs: { type: 'link_code_companion_reg' },
+    content: [{
+      tag: 'link_code_companion_reg', attrs: {},
+      content: [{ tag: 'link_code_pairing_ref', attrs: {}, content: ref }]
+    }]
+  };
+}
 
 function setup({ creds = {}, requestCode = async () => code, save = async () => {} } = {}) {
   let time = 0;
@@ -19,7 +31,7 @@ function setup({ creds = {}, requestCode = async () => code, save = async () => 
   const manager = createConnectionManager({
     phone,
     reasons: { loggedOut: 401, forbidden: 403, multideviceMismatch: 411, connectionReplaced: 440, badSession: 500, restartRequired: 515 },
-    log: { info: (...args) => logs.push(JSON.stringify(args)), error: (...args) => logs.push(JSON.stringify(args)) },
+    log: { info: (...args) => logs.push(JSON.stringify(args)), error: (...args) => logs.push(JSON.stringify(args)), warn: (...args) => logs.push(JSON.stringify(args)) },
     now: () => time,
     schedule(fn, ms) {
       const id = Symbol();
@@ -31,25 +43,25 @@ function setup({ creds = {}, requestCode = async () => code, save = async () => 
       const state = { creds: { ...stored } };
       return { state, saveCreds: async () => { await save(); stored = { ...state.creds }; } };
     },
-    makeSocket(state) {
+    makeSocket(state, notificationError) {
       const sock = {
         ev: new EventEmitter(),
         state,
+        notificationError,
         ws: Object.assign(new EventEmitter(), { isOpen: false }),
         ended: 0,
         requests: 0,
-        end() { this.ended++; this.ws.isOpen = false; },
-        async requestPairingCode(number) {
-          assert.equal(number, phone);
-          this.requests++;
-          this.state.creds.me = { id: phone };
-          this.state.creds.pairingCode = code;
-          this.ev.emit('creds.update');
-          return requestCode();
-        }
+        end() { this.ended++; this.ws.isOpen = false; }
       };
       sockets.push(sock);
       return sock;
+    },
+    async requestPairingCode(sock, number) {
+      assert.equal(number, phone);
+      sock.requests++;
+      sock.state.creds.me = { id: phone };
+      sock.state.creds.pairingCode = code;
+      return { code: await requestCode(), reference };
     },
     onMessages: (sock, event) => messages.push(event)
   });
@@ -125,6 +137,7 @@ test('expires a code, closes its socket, and refreshes only on an explicit authe
   await advance(60_000);
   assert.equal(sockets[0].ended, 1);
   assert.equal(http().result.status, 'pairing_code_expired');
+  assert.equal(http().result.reason, 'pairing_phone_notification_missing');
   assert.equal(http().result.code, undefined);
   assert.equal(http('/pairing?refresh=1', 'Bearer wrong').status, 403);
   assert.equal(sockets.length, 1);
@@ -173,6 +186,10 @@ test('persists signed credentials before the required restart and gates messages
   sock.ws.isOpen = true;
   sock.ev.emit('connection.update', { qr: 'ref' });
   await flush();
+  sock.ws.emit(phoneEvent, phoneNotification());
+  sock.state.creds.registered = true;
+  sock.ev.emit('creds.update');
+  sock.ws.emit('CB:iq,,pair-success');
   sock.state.creds.account = { signed: true };
   sock.state.creds.me = { id: 'linked-device' };
   sock.ev.emit('creds.update');
@@ -235,5 +252,91 @@ test('credential storage failure stops the connection without reconnecting', asy
   assert.equal(sockets[0].ended, 1);
   assert.equal(http().result.reason, 'credential_storage_failed');
   assert.equal(timers.size, 0);
+  await manager.stop();
+});
+
+test('registration rejection exposes only its numeric code and waits for manual retry', async () => {
+  const { manager, http, sockets, timers, logs } = setup({
+    requestCode: async () => {
+      throw Object.assign(new Error('private server text'), { reason: 'pairing_hello_rejected', statusCode: 429 });
+    }
+  });
+  await manager.start();
+  http();
+  await flush();
+  sockets[0].ws.isOpen = true;
+  sockets[0].ev.emit('connection.update', { qr: 'ref' });
+  await flush();
+  assert.deepEqual(http().result, { status: 'connection_failed', reason: 'pairing_hello_rejected', statusCode: 429 });
+  assert.equal(timers.size, 0);
+  assert.doesNotMatch(logs.join(), /private server text/);
+  await manager.stop();
+});
+
+test('distinguishes a phone notification, finish acknowledgement and missing signed response', async () => {
+  const { manager, http, sockets, logs, stored, timers, advance } = setup();
+  await manager.start();
+  http();
+  await flush();
+  const [sock] = sockets;
+  sock.ws.isOpen = true;
+  sock.ev.emit('connection.update', { qr: 'ref' });
+  await flush();
+  assert.equal(http().result.code, code);
+
+  sock.ws.emit(phoneEvent, phoneNotification());
+  assert.equal(http().result.reason, 'pairing_phone_notification_received');
+  assert.equal(http().result.code, undefined);
+  assert.equal(sock.state.creds.pairingCode, code);
+  sock.notificationError(406);
+  assert.match(logs.join(), /notification_processing_error_during_pairing/);
+  assert.doesNotMatch(logs.join(), /test-reference/);
+
+  sock.state.creds.registered = true;
+  sock.ev.emit('creds.update');
+  assert.equal(http().result.reason, 'pairing_finish_acknowledged');
+  assert.deepEqual(stored(), {});
+  await advance(60_000);
+  assert.equal(http().result.reason, 'pairing_signed_response_missing');
+  assert.equal(timers.size, 0);
+  await manager.stop();
+});
+
+test('an invalid signed pair response receives a distinct safe status', async () => {
+  const { manager, http, sockets, logs, stored } = setup();
+  await manager.start();
+  http();
+  await flush();
+  const [sock] = sockets;
+  sock.ws.isOpen = true;
+  sock.ev.emit('connection.update', { qr: 'ref' });
+  await flush();
+  sock.ws.emit(phoneEvent, phoneNotification());
+  sock.ws.emit('CB:iq,,pair-success', { private: 'signed response bytes' });
+  disconnect(sock, 400, 'private verification detail');
+  await flush();
+  assert.equal(http().result.reason, 'pairing_signed_response_failed');
+  assert.deepEqual(stored(), {});
+  assert.doesNotMatch(logs.join(), /signed response bytes|private verification detail/);
+  await manager.stop();
+});
+
+test('an unrelated phone notification cannot advance a confirmed pairing', async () => {
+  const { manager, http, sockets, logs, timers, stored } = setup();
+  await manager.start();
+  http();
+  await flush();
+  const [sock] = sockets;
+  sock.ws.isOpen = true;
+  sock.ev.emit('connection.update', { qr: 'ref' });
+  await flush();
+  assert.equal(http().result.code, code);
+  sock.ws.emit(phoneEvent, phoneNotification(Buffer.from('unrelated-private-reference')));
+  await flush();
+  assert.deepEqual(http().result, { status: 'connection_failed', reason: 'pairing_phone_reference_mismatch' });
+  assert.equal(sock.ended, 1);
+  assert.equal(timers.size, 0);
+  assert.deepEqual(stored(), {});
+  assert.doesNotMatch(logs.join(), /unrelated-private-reference/);
   await manager.stop();
 });
