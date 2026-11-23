@@ -5,6 +5,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { repackVideo } from '../src/ffmpeg.js';
+import { createVideoProgress } from '../src/video-progress.js';
 import { memorySnapshot } from '../src/runtime-diagnostics.js';
 
 const run = promisify(execFile);
@@ -19,7 +20,7 @@ try {
       '-threads:v', '1', '-preset', 'ultrafast', '-x265-params', 'pools=none:frame-threads=1:log-level=error',
       '-pix_fmt', 'yuv420p10le', '-tag:v', 'hvc1', '-c:a', 'aac', input]);
 
-    for (const sizeControl of [false, true]) {
+    for (const [sizeControl, liveProgress] of [[false, false], [true, false], [true, true]]) {
       const output = path.join(dir, 'output.mp4');
       const memory = memorySnapshot();
       let peakCgroupBytes = memory.cgroupBytes;
@@ -28,20 +29,33 @@ try {
         if (cgroupBytes !== undefined) peakCgroupBytes = Math.max(peakCgroupBytes ?? 0, cgroupBytes);
       }, 20);
       let result;
+      const progress = liveProgress && createVideoProgress({
+        title: 'Benchmark', initialStage: 'downloading',
+        async send() { return { key: { fromMe: true, id: 'synthetic' } }; },
+        onClose() {}, onFailedEdit() {}
+      });
       const started = performance.now();
       let elapsedMs;
       try {
-        result = await repackVideo(input, output, { statusVideo: true, ...(sizeControl && { maxOutputBytes }) });
+        result = await repackVideo(input, output, {
+          statusVideo: true, ...(sizeControl && { maxOutputBytes }),
+          ...(progress && {
+            onVideoStage: fields => fields.stage === 'attempt'
+              ? progress.startAttempt(fields) : progress.update(fields.stage),
+            onProgress: fields => progress.sample(fields)
+          })
+        });
       } finally {
         elapsedMs = Math.round(performance.now() - started);
         clearInterval(timer);
+        progress?.close?.();
       }
       const { stdout } = await run('ffmpeg', ['-v', 'error', '-threads', '1', '-i', input,
         '-threads', '1', '-i', output, '-filter_complex_threads', '1',
         '-filter_complex', '[0:v]format=yuv420p[ref];[ref][1:v]ssim=stats_file=-', '-an', '-f', 'null', '-']);
       const scores = [...stdout.matchAll(/All:([\d.]+)/g)].map(match => Number(match[1]));
       console.log(JSON.stringify({
-        fps, sizeControl, elapsedMs, peakCgroupBytes, cgroupLimitBytes: memory.cgroupLimitBytes,
+        fps, sizeControl, liveProgress, elapsedMs, peakCgroupBytes, cgroupLimitBytes: memory.cgroupLimitBytes,
         outputBytes: result.output.bytes, ssim: Number((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(5)),
         width: result.output.width, height: result.output.height
       }));

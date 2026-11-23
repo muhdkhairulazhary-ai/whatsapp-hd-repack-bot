@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
+import { createFfmpegProgressReader } from './ffmpeg-progress.js';
 import { createStderrDiagnostics, describeFfmpegInput } from './ffmpeg-diagnostics.js';
 import { planHevcSize } from './video-size.js';
 import { config } from './config.js';
@@ -83,20 +84,10 @@ function buildStatusArgs(inputPath, outputPath, { duration, video, audio }, fall
 
 function ffmpegProgress(stream, onProgress, intervalMs) {
   const started = Date.now();
-  let pending = '';
-  const values = {};
-  stream.on('data', chunk => {
-    const lines = (pending + chunk).split('\n');
-    pending = lines.pop().slice(-256);
-    for (const line of lines) {
-      const match = /^(frame|out_time_us|total_size|speed)=(\d+(?:\.\d+)?)(?:x)?\s*$/.exec(line);
-      if (match) values[match[1]] = Number(match[2]);
-    }
-  });
+  const reader = createFfmpegProgressReader();
+  stream.on('data', chunk => reader.feed(chunk));
   return setInterval(() => onProgress({
-    stage: 'ffmpeg', elapsedMs: Date.now() - started,
-    frames: values.frame, outputTimeMs: values.out_time_us === undefined ? undefined : values.out_time_us / 1000,
-    outputBytes: values.total_size, speed: values.speed
+    stage: 'ffmpeg', elapsedMs: Date.now() - started, ...reader.snapshot()
   }), intervalMs);
 }
 
@@ -243,7 +234,7 @@ function verifyStatusVideo(input, output, preserveMatrix) {
 }
 
 export async function repackVideo(inputPath, outputPath, {
-  statusVideo = false, signal, onProgress, onStage, inputBytes, readMemory = memorySnapshot, maxOutputBytes, onSizePlan
+  statusVideo = false, signal, onProgress, onStage, inputBytes, readMemory = memorySnapshot, maxOutputBytes, onSizePlan, onVideoStage
 } = {}) {
   const input = await timeStage('ffprobe', onStage, () => probeVideo(inputPath, statusVideo, signal));
   const maxSeconds = statusVideo ? Math.min(config.maxVideoSeconds, 60) : config.maxVideoSeconds;
@@ -274,6 +265,7 @@ export async function repackVideo(inputPath, outputPath, {
       throw new VideoError('validation', 'unsupported_video', 'HEVC dimensions must be even to preserve geometry without padding.');
     }
     let sizePlan;
+    let attempt = 0;
     function checkCancellation() {
       if (signal?.aborted) {
         const source = abortSource(signal);
@@ -308,6 +300,7 @@ export async function repackVideo(inputPath, outputPath, {
         onSizePlan?.(sizePlan);
       }
       const { args } = buildStatusArgs(inputPath, outputPath, input, fallback, sizePlan);
+      onVideoStage?.({ stage: 'attempt', videoMode, durationSeconds: input.duration, attempt: ++attempt });
       try {
         await convert(args);
       } catch (error) {
@@ -316,6 +309,7 @@ export async function repackVideo(inputPath, outputPath, {
         }
         throw error;
       }
+      onVideoStage?.({ stage: 'validating' });
       return timeStage('verification', onStage, async () => {
         const output = await stat(outputPath);
         if (budget && output.size > maxOutputBytes) {
