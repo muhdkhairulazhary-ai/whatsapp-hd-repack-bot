@@ -177,3 +177,54 @@ Recognized video messages and MP4/MOV documents get one Shelby+ progress message
 FFmpeg uses its machine-readable progress on descriptor 3. Both `out_time_us` and the legacy `out_time_ms` contain microseconds on the tested FFmpeg versions. Encoding progress uses the probed duration, stays below 100%, and starts over on a permitted retry. Elapsed time is measured from acceptance. The remaining-time estimate covers encoding only, after enough advancing samples are available. Output validation and delivery take additional time. A paced edit can skip short stages, and the final edit may follow the media by up to one edit interval during normal operation.
 
 A failed edit disables further progress attempts for that job. The bot still sends the video or its normal error reply. Pending edits are bounded and shutdown discards scheduled updates. An edit already sent to Baileys cannot be recalled. Files with ambiguous document metadata may receive only the standard acknowledgment. WhatsApp may decline or delay an edit. The regression verifies serialization with the installed Baileys library, without contacting a live WhatsApp account.
+
+### Turbo Engine experiment
+
+The benchmark runs the actual Baileys media handler with synthetic MOV fixtures, local file streams in place of WhatsApp download and upload, and a simulated progress-message sender. It separates download, FFprobe, FFmpeg, verification, upload and end-to-end timings. Keep the default one active job on Render Free. Network transfer, scheduling delays and Render's actual CPU allocation vary and are outside this benchmark.
+
+The current encoding path already copies compatible video and AAC, skips resizing or unnecessary pixel filters, decodes and encodes with one video thread apiece, and runs a single filter thread. Main 10 input still needs an 8-bit pixel-format conversion. Fast-start MP4 performs a local muxer relocation. The input probe chooses streams and checks duration and geometry. The output probe validates the resulting container and timing, so it serves a separate purpose. The delivery path already reads the result from disk without putting the whole file in Node's memory.
+
+Use a Docker image built from this branch to repeat the experiment.
+
+```sh
+docker build -t shelby-turbo .
+docker run --rm --cpus=1 --memory=512m --memory-swap=512m shelby-turbo node scripts/benchmark-turbo.js
+```
+
+The script uses a benchmark-only FFmpeg shim and rotates candidate order across three runs per configuration. It compares current ultrafast, two decoder threads, two encoder threads, two filter threads, and fast bilinear conversion. All candidates use the existing bitrate budget, stream mapping, muxing and output verification. Each fixture records one SSIM measurement per candidate against an 8-bit reference. The quality metric does not establish HDR display accuracy. VMAF was unavailable in the tested image.
+
+HEVC output is 8-bit H.264 yuv420p. There is no tone mapping or Dolby Vision output. HLG color tags may carry through depending on the FFmpeg build. Tagged 8-bit HLG is neither guaranteed HDR fidelity nor a tone-mapped SDR rendition. An untagged output also should not be interpreted as a correct SDR conversion. The color path is unchanged by this experiment.
+
+#### Constrained results
+
+Medians from three runs per configuration in a one-CPU, 512 MiB, no-swap container. The UHD guard ran once. All timed stages below are milliseconds. Download and upload are local file operations.
+
+| Current pipeline fixture | Download | FFprobe | FFmpeg | Verify | Upload | Total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Compatible 1080p30 Smart Copy | 8 | 82 | 86 | 81 | 2 | 264 |
+| 1080p30 HEVC 8-bit | 3 | 62 | 1336 | 81 | 2 | 1489 |
+| 1080p60 HEVC 8-bit, high motion | 3 | 64 | 2386 | 86 | 7 | 2549 |
+| 1080p60 HEVC Main 10, HLG | 2 | 63 | 3046 | 91 | 11 | 3212 |
+| 1080p30 HEVC Main 10, 12 s | 6 | 63 | 4851 | 83 | 34 | 5039 |
+| UHD HEVC guard | 1 | 62 | — | — | — | 63 |
+
+| HEVC fixture | Current | Decoder 2 | Encoder 2 | Filter 2 | Fast bilinear |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1080p30 HEVC 8-bit | 1336 | 1397 | 1373 | 1316 | 1300 |
+| 1080p60 HEVC 8-bit, high motion | 2386 | 2738 | 2494 | 2384 | 2424 |
+| 1080p60 HEVC Main 10, HLG | 3046 | 3109 | 3110 | 3111 | 3063 |
+| 1080p30 HEVC Main 10, 12 s | 4851 | 5019 | 5020 | 4952 | 4868 |
+
+| Current pipeline fixture | Output MB | FFmpeg peak RSS MiB | Cgroup peak MiB | SSIM | Processing FPS / speed | Sampled FFmpeg CPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Compatible 1080p30 Smart Copy | 5.98 | 63.6 | 91.9 | 1.000000 | 1047 / 34.88× | 71% |
+| 1080p30 HEVC 8-bit | 3.86 | 120.3 | 134.4 | 0.991896 | 90 / 2.99× | 96% |
+| 1080p60 HEVC 8-bit, high motion | 5.18 | 120.6 | 136.8 | 0.981179 | 101 / 1.68× | 97% |
+| 1080p60 HEVC Main 10, HLG | 5.18 | 140.9 | 158.6 | 0.988696 | 79 / 1.31× | 98% |
+| 1080p30 HEVC Main 10, 12 s | 11.03 | 141.1 | 171.1 | 0.989877 | 74 / 2.47× | 98% |
+
+The Smart Copy throughput figures describe remux throughput rather than encoded frames. Peak memory is the highest observation across the three runs, with cgroup usage including page cache. All 63 accepted cases validated at 1080×1920 and the source FPS, preserved the measured audio start offset to within 1 ms, and completed with zero retries. The UHD guard rejected the 4K fixture after probing with zero FFmpeg attempts and a 65.6 MiB cgroup peak. On the HLG fixture the tested Docker output retained the HLG transfer tag at 8-bit depth. No tone mapping was applied.
+
+The best isolated timing change was fast bilinear on 8-bit 30 fps, about 2.7% less encode time. It slowed the high-motion 60 fps fixture about 1.6%. Two decoder threads increased high-motion encode time about 14.8%. The two-encoder-thread outputs were slightly smaller (under 0.3%) with absolute SSIM differences below 0.00025. Other candidates produced the same measured sizes and SSIM as the baseline. Across candidates, measured peak cgroup usage stayed below 181 MiB for the accepted fixtures.
+
+**Decision:** retain the current production media path. FFmpeg accounted for roughly 90–96% of active HEVC time on these local fixtures. Input and output probes together accounted for most of the time outside muxing on the Smart Copy fixture. These measurements support keeping both probes and the existing single-thread encoder settings. The original large iPhone clips and live Render uploads were unavailable, so this PR makes no production speed claim. Rolling back this PR removes benchmark, tests, documentation and CI wiring. It requires no auth, data or configuration migration. [Full benchmark logs](https://github.com/muhdkhairulazhary-ai/whatsapp-hd-repack-bot/actions/runs/45207542912)
