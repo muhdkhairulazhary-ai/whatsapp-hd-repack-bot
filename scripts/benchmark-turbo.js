@@ -1,9 +1,8 @@
 // Synthetic, repeatable experiment. The shim changes only benchmark runs.
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { createReadStream } from 'node:fs';
-import { readFileSync } from 'node:fs';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { createReadStream, readFileSync } from 'node:fs';
+import { copyFile, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -16,6 +15,7 @@ const { stdout: ffmpegPath } = await run('sh', ['-c', 'command -v ffmpeg']);
 const ffmpeg = ffmpegPath.trim();
 const { stdout: tickRate } = await run('getconf', ['CLK_TCK']);
 const originalPath = process.env.PATH;
+const repeats = process.argv.includes('--smoke') ? 1 : 3;
 const candidates = ['current', 'decoder-2', 'encoder-2', 'filter-2', 'fast-bilinear'];
 const fixtures = [
   { name: 'smart-copy', fps: 30, seconds: 3, codec: 'libx264', pix: 'yuv420p' },
@@ -90,6 +90,11 @@ async function measure(fixture, candidate, sample, source, size) {
   }, 20);
   const handler = createMessageHandler({
     tempRoot: dir, maxOutputBytes: 14_000_000,
+    // The guard test must not encode UHD even on a developer machine.
+    readMemory: fixture.name === 'guard-4k' ? () => {
+      const memory = memorySnapshot();
+      return { ...memory, cgroupLimitBytes: Math.min(memory.cgroupLimitBytes ?? Infinity, 512 * 1024 ** 2) };
+    } : memorySnapshot,
     downloadMediaMessage: async () => createReadStream(input),
     log: {
       info(fields, message) {
@@ -104,7 +109,6 @@ async function measure(fixture, candidate, sample, source, size) {
   const socket = { async sendMessage(_jid, content) {
     if (content.video) {
       deliveredPath = path.join(dir, 'delivered.mp4');
-      const { copyFile } = await import('node:fs/promises');
       await copyFile(content.video.url, deliveredPath);
     }
     return { key: { id: 'synthetic-progress', fromMe: true } };
@@ -171,12 +175,14 @@ try {
     await run(ffmpeg, ['-v', 'error', '-y', '-filter_threads', '1', '-f', 'lavfi', '-i', video,
       '-itsoffset', '0.16', '-f', 'lavfi', '-i', 'sine=frequency=500', '-t', String(fixture.seconds),
       '-c:v', fixture.codec, '-preset', 'ultrafast', '-threads:v', '1', '-pix_fmt', fixture.pix,
-      ...(fixture.codec === 'libx265' ? ['-x265-params', 'pools=none:frame-threads=1:log-level=error'] : []),
-      ...(fixture.hdr ? ['-color_trc', 'arib-std-b67', '-color_primaries', 'bt2020', '-colorspace', 'bt2020nc'] : []),
+      ...(fixture.codec === 'libx265' ? ['-x265-params', 'pools=none:frame-threads=1:log-level=error' +
+        (fixture.hdr ? ':colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc' : '')] : []),
+      ...(fixture.hdr ? ['-color_trc', 'arib-std-b67', '-color_primaries', 'bt2020', '-colorspace', 'bt2020nc', '-movflags', '+write_colr'] : []),
       '-c:a', 'aac', input]);
     const source = await probe(input);
+    if (fixture.hdr) assert.equal(source[0].color_transfer, 'arib-std-b67');
     const bytes = (await stat(input)).size;
-    const count = fixture.name === 'guard-4k' ? 1 : 3;
+    const count = fixture.name === 'guard-4k' ? 1 : repeats;
     const list = fixture.name === 'guard-4k' || fixture.name === 'smart-copy' ? ['current'] : candidates;
     for (let sample = 0; sample < count; sample++) {
       for (const candidate of [...list.slice(sample % list.length), ...list.slice(0, sample % list.length)]) {
