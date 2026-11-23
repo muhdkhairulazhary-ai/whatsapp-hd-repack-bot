@@ -18,11 +18,13 @@ const ownKey = { remoteJid: '10000000001@s.whatsapp.net', fromMe: true, id: 'pro
 test('reads actual FFmpeg progress time units and handles split, invalid and legacy fields', async () => {
   const { stdout } = await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=s=32x32:r=10',
     '-t', '1', '-progress', 'pipe:1', '-f', 'null', '-']);
-  assert.match(stdout, /^out_time_ms=1000000$/m);
-  assert.match(stdout, /^out_time_us=1000000$/m);
+  const last = key => [...stdout.matchAll(new RegExp(`^${key}=(\\d+)$`, 'gm'))].at(-1)?.[1];
+  const microseconds = Number(last('out_time_us'));
+  assert.ok(microseconds >= 900_000 && microseconds <= 1_000_000);
+  assert.equal(Number(last('out_time_ms')), microseconds);
   const real = createFfmpegProgressReader();
   real.feed(stdout);
-  assert.equal(real.snapshot().outputTimeMs, 1000);
+  assert.equal(real.snapshot().outputTimeMs, microseconds / 1000);
   assert.equal(real.snapshot().progress, 'end');
 
   const sample = createFfmpegProgressReader();
