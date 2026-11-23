@@ -31,4 +31,5 @@ jobs:
       - name: Benchmark video size control in the 512 MiB Docker image
         run: docker run --rm --cpus=1 --memory=512m --memory-swap=512m whatsapp-hd-baileys:test node scripts/benchmark-video-size.js
       - name: Benchmark Turbo candidates in the 512 MiB Docker image
+        if: github.event_name == 'workflow_dispatch'
         run: docker run --rm --cpus=1 --memory=512m --memory-swap=512m whatsapp-hd-baileys:test node scripts/benchmark-turbo.js
