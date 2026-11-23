@@ -60,11 +60,15 @@ truncate -s 350000 "$output"
 `, { mode: 0o700 });
   process.env.PATH = `${dir}:${previousPath}`;
   const plans = [];
+  const stages = [];
   await assert.rejects(repackVideo(input, output, {
-    statusVideo: true, maxOutputBytes: 300_000, onSizePlan: plan => plans.push(plan)
+    statusVideo: true, maxOutputBytes: 300_000, onSizePlan: plan => plans.push(plan),
+    onVideoStage: stage => stages.push(stage)
   }), { reason: 'output_limit' });
   assert.equal(plans.length, 2);
   assert.ok(plans[1].videoKbps < plans[0].videoKbps);
+  assert.deepEqual(stages.map(fields => fields.stage === 'attempt' ? fields.attempt : fields.stage),
+    [1, 'validating', 2, 'validating']);
   assert.equal((await readFile(count, 'utf8')).trim().split('\n').length, 2);
 
   const cancelled = new AbortController();

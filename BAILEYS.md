@@ -169,3 +169,11 @@ Synthetic HEVC Main 10 HLG with a first audio sample description marked as unkno
 For a failed production job, use the existing `Media processing failed` log and collect `reason`, `exitCode`, `signal`, `stderrCategories`, `stderrBytes`, and the allowlisted `input` fields. These are fixed labels, counts, and technical stream properties. The bot never emits raw FFmpeg stderr, paths, URLs, or arbitrary metadata. Decoder absence is separate from encoder or muxer failure. An advisory unsupported-codec line by itself does not establish why FFmpeg exited.
 
 If the same failure persists, those diagnostics and the deployed FFmpeg version can narrow the cause. A reproducible source clip or complete FFmpeg stderr captured in a private environment may still be needed. Remove locations, credentials and other sensitive data before sharing any output.
+
+### Live video progress
+
+Recognized video messages and MP4/MOV documents get one Shelby+ progress message. On Baileys 6.7.24 the bot edits its own message using its returned key. It coalesces changes and sends edits at least 12 seconds apart, independently of media processing. Download progress uses the declared file length when available. Smart Copy, output validation and upload show a stage without a fabricated percentage.
+
+FFmpeg uses its machine-readable progress on descriptor 3. Both `out_time_us` and the legacy `out_time_ms` contain microseconds on the tested FFmpeg versions. Encoding progress uses the probed duration, stays below 100%, and starts over on a permitted retry. Elapsed time is measured from acceptance. The remaining-time estimate covers encoding only, after enough advancing samples are available. Output validation and delivery take additional time. A paced edit can skip short stages, and the final edit may follow the media by up to one edit interval during normal operation.
+
+A failed edit disables further progress attempts for that job. The bot still sends the video or its normal error reply. Pending edits are bounded and shutdown discards scheduled updates. An edit already sent to Baileys cannot be recalled. Files with ambiguous document metadata may receive only the standard acknowledgment. WhatsApp may decline or delay an edit. The regression verifies serialization with the installed Baileys library, without contacting a live WhatsApp account.
