@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
+import { createStderrDiagnostics, describeFfmpegInput } from './ffmpeg-diagnostics.js';
 import { planHevcSize } from './video-size.js';
 import { config } from './config.js';
 import { HIGH_RES_TRANSCODE_HEADROOM, mediaMemoryLimit, memorySnapshot, timeStage } from './runtime-diagnostics.js';
@@ -66,7 +67,7 @@ function buildStatusArgs(inputPath, outputPath, { duration, video, audio }, fall
       '-filter_threads', '1', '-threads', '1', '-protocol_whitelist', 'file', '-f', 'mov',
       ...(keepMatrix ? ['-noautorotate'] : []), '-i', inputPath,
       ...(!audio ? ['-f', 'lavfi', '-t', String(duration), '-i', 'anullsrc=r=44100:cl=stereo'] : []),
-      '-map', '0:V:0', '-map', audio ? '0:a:0' : '1:a:0',
+      '-map', `0:${video.index}`, '-map', audio ? `0:${audio.index}` : '1:a:0',
       ...(copyVideo ? ['-c:v', 'copy'] : [
         '-c:v', 'libx264', '-preset', hevc ? 'ultrafast' : 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
         ...(sizePlan ? ['-maxrate:v', `${sizePlan.videoKbps}k`, '-bufsize:v', `${sizePlan.bufferKbits}k`] : []),
@@ -117,10 +118,7 @@ export function runTool(command, args, { stage, timeoutMs, captureOutput = false
     });
     const progress = onProgress && ffmpegProgress(child.stdio[3], onProgress, progressIntervalMs);
     let stdout = '';
-    let stderr = '';
-    let memoryFailure = false;
-    let diskFull = false;
-    let unsupportedCodec = false;
+    const stderr = createStderrDiagnostics();
     let stopSource;
     let spawnError;
     const stop = source => {
@@ -133,24 +131,19 @@ export function runTool(command, args, { stage, timeoutMs, captureOutput = false
     signal?.addEventListener('abort', abort, { once: true });
 
     child.stdout?.on('data', chunk => { stdout = (stdout + chunk).slice(0, 32768); });
-    child.stderr.on('data', chunk => {
-      stderr = (stderr + chunk).slice(-4096);
-      memoryFailure ||= /cannot allocate memory|out of memory|failed to allocate|allocation failed/i.test(stderr);
-      diskFull ||= /no space left on device/i.test(stderr);
-      unsupportedCodec ||= /decoder .*not found|unknown decoder|unsupported codec/i.test(stderr);
-    });
+    child.stderr.on('data', chunk => stderr.observe(chunk));
     child.once('error', error => { spawnError = error; });
     child.once('close', (exitCode, exitSignal) => {
       clearTimeout(timer);
       clearInterval(progress);
       signal?.removeEventListener('abort', abort);
-      const details = { exitCode, signal: exitSignal };
+      const details = { exitCode, signal: exitSignal, ...stderr.summary() };
       if (stopSource) {
         reject(new VideoError(stage, ['shutdown', 'cancelled'].includes(stopSource) ? stopSource : 'timeout',
           `${command} was stopped.`, { ...details, stopSource }));
-      } else if (memoryFailure || spawnError?.code === 'ENOMEM') {
+      } else if (stderr.has('memory_allocation') || spawnError?.code === 'ENOMEM') {
         reject(new VideoError(stage, 'memory_exhausted', `${command} ran out of memory.`, details));
-      } else if (diskFull || spawnError?.code === 'ENOSPC') {
+      } else if (stderr.has('disk_full') || spawnError?.code === 'ENOSPC') {
         reject(new VideoError(stage, 'disk_full', 'Temporary storage is full.', details));
       } else if (spawnError) {
         reject(new VideoError(stage, 'tool_start_failed', `${command} could not start.`, details));
@@ -161,7 +154,8 @@ export function runTool(command, args, { stage, timeoutMs, captureOutput = false
       } else if (exitCode !== 0) {
         const reason = stage === 'image' ? 'image_conversion_failed'
           : stage === 'verification' ? 'output_invalid'
-          : stage === 'validation' || unsupportedCodec ? 'unsupported_video' : 'encode_failed';
+          : stage === 'validation' ? 'unsupported_video'
+          : stderr.has('decoder_unavailable') ? 'decoder_unavailable' : 'encode_failed';
         reject(new VideoError(stage, reason, `${command} failed with exit code ${exitCode}.`, details));
       } else {
         resolve(stdout);
@@ -172,7 +166,7 @@ export function runTool(command, args, { stage, timeoutMs, captureOutput = false
 
 async function probeVideo(inputPath, statusVideo, signal, stage = 'validation') {
   const entries = statusVideo
-    ? 'format=duration,bit_rate:format_tags=major_brand:stream=codec_type,codec_name,profile,pix_fmt,width,height,avg_frame_rate,r_frame_rate,bit_rate,channels,start_time,duration,field_order,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data=rotation,displaymatrix'
+    ? 'format=duration,bit_rate:format_tags=major_brand:stream=index,codec_type,codec_name,codec_tag_string,profile,pix_fmt,color_transfer,width,height,avg_frame_rate,r_frame_rate,bit_rate,channels,start_time,duration,field_order,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data=rotation,displaymatrix,side_data_type'
     : 'format=duration';
   const output = await runTool('ffprobe', [
     '-v', 'error', ...(statusVideo ? ['-threads', '1', '-protocol_whitelist', 'file', '-f', 'mov'] : []),
@@ -188,7 +182,13 @@ async function probeVideo(inputPath, statusVideo, signal, stage = 'validation') 
   const streams = metadata.streams || [];
   const brand = metadata.format?.tags?.major_brand || '';
   const video = streams.find(stream => stream.codec_type === 'video' && !stream.disposition?.attached_pic);
-  const audio = streams.find(stream => stream.codec_type === 'audio');
+  const audioTracks = streams.filter(stream => stream.codec_type === 'audio');
+  const recognizedAudio = track => track?.codec_name && !['unknown', 'none'].includes(track.codec_name);
+  const firstAudio = audioTracks[0];
+  // Some iPhone MOVs offer both a spatial track and an AAC stereo track.
+  // If FFmpeg cannot identify the first codec, map a recognized alternative.
+  const audio = recognizedAudio(firstAudio) ? firstAudio :
+    audioTracks.find(compatibleAudio) ?? audioTracks.find(recognizedAudio) ?? firstAudio;
   if (!Number.isFinite(duration) || duration <= 0 || (statusVideo &&
       (/^(3g|mj2)/i.test(brand) || !video?.width || !video?.height))) {
     throw new VideoError(stage, stage === 'verification' ? 'output_invalid' : 'unsupported_video', 'Unsupported or damaged video.');
@@ -308,7 +308,14 @@ export async function repackVideo(inputPath, outputPath, {
         onSizePlan?.(sizePlan);
       }
       const { args } = buildStatusArgs(inputPath, outputPath, input, fallback, sizePlan);
-      await convert(args);
+      try {
+        await convert(args);
+      } catch (error) {
+        if (error instanceof VideoError) {
+          error.details.input = describeFfmpegInput(input, { videoMode, audioMode, videoKbps: sizePlan?.videoKbps });
+        }
+        throw error;
+      }
       return timeStage('verification', onStage, async () => {
         const output = await stat(outputPath);
         if (budget && output.size > maxOutputBytes) {

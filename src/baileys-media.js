@@ -21,6 +21,8 @@ const userMessages = {
   image: 'Gambar gagal diproses. Cuba hantar fail JPEG, PNG atau HEIC lain.',
   size_quality_limit: 'Video ini tidak boleh dimuatkan dalam had saiz dengan kualiti yang sesuai. Sila potong video kepada klip yang lebih pendek.',
   output_invalid: 'Video yang diproses tidak serasi. Sila cuba fail MP4 atau MOV lain.',
+  decoder_unavailable: 'Pelayan tidak dapat membaca salah satu trek video ini. Cuba eksport semula sebagai MP4 dengan audio AAC.',
+  encode_failed: 'Video gagal ditukar. Cuba eksport semula sebagai MP4 atau hantar klip lain.',
   unsupported_video: 'Format video tidak disokong atau fail rosak. Sila hantar fail MP4 atau MOV.',
   timeout: 'Masa pemprosesan tamat. Sila cuba video yang lebih kecil atau pendek.',
   video_memory_budget: 'Pelayan tidak mempunyai memori mencukupi untuk menukar video beresolusi tinggi ini. Sila hantar versi 1080p.',
