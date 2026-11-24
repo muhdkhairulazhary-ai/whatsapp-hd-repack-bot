@@ -150,9 +150,9 @@ export function createVideoProgress({
       current = { stage: estimate ? 'processing' : 'copy', attempt };
       flush();
     },
-    sample(fields) {
+    sample(fields, measured) {
       if (closed || terminal || paused || current.stage !== 'processing' || !estimate) return;
-      current = { stage: 'processing', attempt, ...estimate(fields) };
+      current = { stage: 'processing', attempt, ...(measured ?? estimate(fields)) };
       flush();
     },
     pause() {

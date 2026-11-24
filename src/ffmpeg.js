@@ -300,7 +300,8 @@ export async function repackVideo(inputPath, outputPath, {
         onSizePlan?.(sizePlan);
       }
       const { args } = buildStatusArgs(inputPath, outputPath, input, fallback, sizePlan);
-      onVideoStage?.({ stage: 'attempt', videoMode, durationSeconds: input.duration, attempt: ++attempt });
+      onVideoStage?.({ stage: 'attempt', videoMode, durationSeconds: input.duration, attempt: ++attempt,
+        ...mediaMetrics(input, inputBytes) });
       try {
         await convert(args);
       } catch (error) {

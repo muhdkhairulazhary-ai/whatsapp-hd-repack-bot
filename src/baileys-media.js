@@ -7,7 +7,7 @@ import { getWAUploadToServer, jidNormalizedUser } from '@whiskeysockets/baileys'
 import { branding, commandReply } from './shelby-commands.js';
 import { detectImageFormat, processImage } from './shelby-image.js';
 import { HIGH_RES_TRANSCODE_HEADROOM, mediaMemoryLimit, memorySnapshot, timeStage } from './runtime-diagnostics.js';
-import { createVideoProgress } from './video-progress.js';
+import { createEncodingProgress, createVideoProgress } from './video-progress.js';
 import { repackVideo, VideoError } from './ffmpeg.js';
 
 export const MAX_STATUS_INPUT_BYTES = 150_000_000;
@@ -62,7 +62,7 @@ export function createMessageHandler({
   maxBytes = Number(process.env.BAILEYS_MAX_INPUT_BYTES ?? MAX_STATUS_INPUT_BYTES),
   maxOutputBytes = Number(process.env.BAILEYS_MAX_OUTPUT_BYTES ?? MAX_STATUS_INPUT_BYTES),
   downloadTimeoutMs = DOWNLOAD_TIMEOUT_MS,
-  readMemory = memorySnapshot, progressOptions
+  readMemory = memorySnapshot, progressOptions, telemetry
 }) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_STATUS_INPUT_BYTES) {
     throw new Error('BAILEYS_MAX_INPUT_BYTES must be an integer between 1 and 150000000.');
@@ -111,7 +111,7 @@ export function createMessageHandler({
     }
   }
 
-  async function processMedia({ sock, jid, msg, media, kind, progress }, controller) {
+  async function processMedia({ sock, jid, msg, media, kind, progress, observation }, controller) {
     const started = Date.now();
     const timing = fields => log.info?.(fields, 'Media stage timing');
     let dir;
@@ -125,6 +125,7 @@ export function createMessageHandler({
     const jobTimer = setTimeout(() => controller.abort('job_deadline'), jobTimeoutMs);
     const rejectSize = () => new VideoError('validation', 'input_limit', 'Input exceeds the size limit.', { limitBytes: maxBytes });
     try {
+      observation?.update({ stage: 'downloading' });
       const declaredBytes = Number(media.fileLength);
       if (declaredBytes > maxBytes) {
         throw new VideoError('validation', 'input_limit', 'Input exceeds the size limit.', {
@@ -169,6 +170,8 @@ export function createMessageHandler({
       const imageFormat = kind === 'video' ? null : await detectImageFormat(input);
       const image = kind === 'image' || Boolean(imageFormat);
       stage = image ? 'image' : 'ffmpeg';
+      observation?.update({ kind: image ? 'image' : 'video', inputBytes: bytes, ...(image && { stage }) });
+      let estimate;
       let output = path.join(dir, 'output.mp4');
       let mimetype = 'video/mp4';
       let metrics;
@@ -180,11 +183,24 @@ export function createMessageHandler({
           statusVideo: true, signal, onStage: timing, inputBytes: bytes, readMemory, maxOutputBytes,
           onSizePlan: fields => log.info?.(fields, 'HEVC output size budget'),
           onVideoStage: update => {
-            if (update.stage === 'attempt') progress?.startAttempt(update);
-            else progress?.update(update.stage);
+            if (update.stage === 'attempt') {
+              progress?.startAttempt(update);
+              if (observation) {
+                const { videoMode, durationSeconds, attempt, width, height, fps } = update;
+                estimate = videoMode === 'encode' ? createEncodingProgress(durationSeconds) : undefined;
+                const [frames, seconds = 1] = String(fps).split('/').map(Number);
+                observation.update({ stage: estimate ? 'processing' : 'copy', method: videoMode,
+                  attempt, width, height, fps: frames / seconds, percent: null, etaSeconds: null });
+              }
+            } else {
+              progress?.update(update.stage);
+              observation?.update({ stage: update.stage, percent: null, etaSeconds: null });
+            }
           },
           onProgress: fields => {
-            progress?.sample(fields);
+            const measured = estimate?.(fields);
+            if (measured) observation.update(measured);
+            progress?.sample(fields, measured);
             log.info?.(fields, 'FFmpeg progress');
           }
         });
@@ -198,6 +214,7 @@ export function createMessageHandler({
       }
       if (signal.aborted) throw new VideoError(stage, 'timeout', 'Media job timed out.');
       progress?.update('sending');
+      observation?.update({ stage: 'sending', outputBytes: metrics.output.bytes, percent: null, etaSeconds: null });
       const options = { mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS };
       if (sock.refreshMediaConn) {
         const upload = getWAUploadToServer({ customUploadHosts: [], logger: privateLogger, options: { signal } },
@@ -217,6 +234,7 @@ export function createMessageHandler({
         width: metrics.output.width,
         height: metrics.output.height
       }, options));
+      observation?.finish('success');
       if (!signal.aborted) progress?.finish('completed');
       else progress?.close();
       log.info?.({ stage: 'total', elapsedMs: Date.now() - started, outcome: 'ok' }, 'Media job timing');
@@ -229,6 +247,9 @@ export function createMessageHandler({
       const failure = signal.reason === 'shutdown' && !(error instanceof VideoError)
         ? { stage, reason: 'shutdown', stopSource: 'shutdown' }
         : failureDetails(error, stage, downloadTimedOut || signal.aborted);
+      observation?.update({ ...(bytes > 0 && { inputBytes: bytes }),
+        ...(Number.isSafeInteger(failure.outputBytes) && { outputBytes: failure.outputBytes }) });
+      observation?.finish('failed', failure.reason === 'operation_failed' ? stage : failure.reason);
       controller.abort();
       log.error({ ...failure, downloadedBytes: bytes, elapsedMs: Date.now() - started }, 'Media processing failed');
       log.info?.({ stage: 'total', elapsedMs: Date.now() - started, outcome: 'failed' }, 'Media job timing');
@@ -237,6 +258,7 @@ export function createMessageHandler({
         else await sendText(sock, jid, `❌ ${replyFor(failure)}`);
       }
     } finally {
+      observation?.discard();
       signal.removeEventListener('abort', pauseProgress);
       clearTimeout(jobTimer);
       clearTimeout(downloadTimer);
@@ -306,7 +328,8 @@ export function createMessageHandler({
         progressMessages.add(progress);
       }
       if (key) accepted.add(key);
-      jobs.push(new Promise(done => queue.push({ sock, jid, msg, media, kind, key, done, progress })));
+      jobs.push(new Promise(done => queue.push({ sock, jid, msg, media, kind, key, done, progress,
+        observation: telemetry?.start(jid, kind, Number(media.fileLength)) })));
       pump();
       if (waiting && !progress) await sendText(sock, jid, '⏳ Fail anda dalam barisan pemprosesan.');
     }
@@ -318,6 +341,7 @@ export function createMessageHandler({
     stopping = true;
     for (const progress of progressMessages) progress.close();
     for (const job of queue.splice(0)) {
+      job.observation?.discard();
       accepted.delete(job.key);
       job.done();
     }

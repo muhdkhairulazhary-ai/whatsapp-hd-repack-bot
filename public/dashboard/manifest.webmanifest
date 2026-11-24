@@ -1,0 +1,13 @@
+{
+  "name": "Shelby+ Control Center",
+  "short_name": "Shelby+",
+  "start_url": "/dashboard",
+  "scope": "/dashboard",
+  "display": "standalone",
+  "background_color": "#0d0e10",
+  "theme_color": "#0d0e10",
+  "icons": [
+    {"src": "/dashboard/icon.svg", "sizes": "any", "type": "image/svg+xml"},
+    {"src": "/dashboard/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"}
+  ]
+}
