@@ -80,9 +80,15 @@ export function createAdmin({ config = adminConfig(), connection, media, now = D
     if (!value) return null;
     const id = digest(value).toString('hex');
     const stored = sessions.get(id);
-    if (!stored) return null;
-    if (now() >= stored.expires) { sessions.delete(id); return null; }
+    if (!validSession(id, stored)) return null;
     return { ...stored, id };
+  }
+
+  function validSession(id, stored = sessions.get(id)) {
+    if (!stored) return false;
+    if (now() < stored.expires) return true;
+    sessions.delete(id);
+    return false;
   }
 
   function system(snapshot) {
@@ -142,7 +148,6 @@ export function createAdmin({ config = adminConfig(), connection, media, now = D
       if (!equal(credential, typeof body?.token === 'string' ? body.token : '')) {
         return reply(401, { error: 'Invalid access token.' });
       }
-      attempts = 0;
       for (const [id, value] of sessions) if (value.expires <= stamp) sessions.delete(id);
       if (current) sessions.delete(current.id);
       if (sessions.size >= 16) sessions.delete(sessions.keys().next().value);
@@ -164,6 +169,7 @@ export function createAdmin({ config = adminConfig(), connection, media, now = D
     if (pathname === '/api/admin/state' && req.method === 'GET') {
       const query = new URLSearchParams(search);
       const snapshot = await analytics.read();
+      if (!validSession(current.id)) return reply(401, { error: 'Sign in required.' });
       const view = query.get('view');
       const filter = query.get('filter');
       const output = {

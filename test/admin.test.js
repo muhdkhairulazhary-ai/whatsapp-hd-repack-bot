@@ -69,7 +69,11 @@ test('login security, separate health, Redis failure, CSRF, expiration and logou
   assert.match(privatePage.headers.get('content-security-policy'), /frame-ancestors 'none'/);
   assert.equal((await get('/api/admin/state')).status, 401);
   assert.equal((await get('/api/admin/login', loginOptions(token, 'https://other.example'))).status, 403);
-  for (let i = 0; i < 5; i++) assert.equal((await get('/api/admin/login', loginOptions('wrong'))).status, 401);
+  for (let i = 0; i < 5; i++) {
+    const options = loginOptions('wrong');
+    options.headers['x-forwarded-for'] = '192.0.2.' + i;
+    assert.equal((await get('/api/admin/login', options)).status, 401);
+  }
   assert.equal((await get('/api/admin/login', loginOptions())).status, 429);
   stamp += 60_000;
   const response = await get('/api/admin/login', loginOptions());
@@ -150,8 +154,9 @@ test('real Redis retains bounded job data across app restart and deduplicates wr
   assert.equal(await command(writes[0][0]), 0);
   const recordJson = writes[0][0][18];
   assert.doesNotMatch(recordJson, /123456789|whatsapp\.net/);
+  assert.ok(writes.every(([args]) => args.slice(3, 8).every(key => /^shelby:dashboard:\{[a-f0-9]{24}\}:/.test(key))));
   const historyKey = writes[0][0][5];
-  const expired = { ...JSON.parse(recordJson), id: randomBytes(16).toString('hex') + 'abcd' };
+  const expired = { ...JSON.parse(recordJson), id: randomBytes(16).toString('hex') + 'abcd', finishedAt: stamp - 31 * 86400000 };
   await command(['ZADD', historyKey, stamp - 31 * 86400000, JSON.stringify(expired)]);
   assert.ok(await command(['TTL', historyKey]) > 0);
 
@@ -189,4 +194,53 @@ test('terminal writes are bounded and failures do not reject the media observer'
   await tick();
   assert.deepEqual(analytics.health(), { redis: 'unavailable', dropped: 20 });
   assert.deepEqual(analytics.active(), []);
+});
+
+test('the admin session remains required throughout an in-flight analytics read', async t => {
+  let unblock;
+  let reading;
+  const readStarted = new Promise(resolve => { reading = resolve; });
+  const blocked = new Promise(resolve => { unblock = resolve; });
+  let stamp = Date.UTC(2026, 10, 24, 1);
+  let shouldBlock = false;
+  const get = await serve(t, createAdmin({ config: adminConfig(authEnv), now: () => stamp,
+    command: async () => { if (shouldBlock) { reading(); await blocked; } return empty; } }));
+  const response = await get('/api/admin/login', loginOptions());
+  const cookie = response.headers.get('set-cookie').split(';')[0];
+  const read = () => get('/api/admin/state', { headers: { cookie } });
+  assert.equal((await get('/api/admin/state?token=' + token, { headers: {
+    authorization: 'Bearer ' + token, cookie: '__Host-shelby-admin=' + token, 'x-forwarded-user': 'admin'
+  } })).status, 401);
+  assert.equal((await get('/dashboard/index.html')).status, 401);
+  const { csrf } = await (await read()).json();
+  stamp += 13_000;
+  shouldBlock = true;
+  const pending = read();
+  await readStarted;
+  try {
+    assert.equal((await get('/api/admin/logout', { method: 'POST',
+      headers: { cookie, origin, 'x-csrf-token': csrf } })).status, 200);
+  } finally { unblock(); }
+  assert.equal((await pending).status, 401);
+});
+
+test('a Redis outage does not extend the history retention cutoff', async () => {
+  let stamp = Date.UTC(2026, 10, 24, 1);
+  const finishedAt = stamp - 30 * 86_400_000 + 15_000;
+  let fail = false;
+  const analytics = createAnalytics({ namespace: 'test', key: randomBytes(32), now: () => stamp,
+    command: async () => {
+      if (fail) throw new Error('outage');
+      const user = 'a'.repeat(32);
+      return [[], [JSON.stringify({ id: '6'.repeat(36), user, result: 'success', finishedAt })],
+        [user, finishedAt], empty[3]];
+    }
+  });
+  assert.equal((await analytics.read()).jobs.length, 1);
+  fail = true;
+  stamp += 13_000;
+  assert.equal((await analytics.read()).jobs.length, 1);
+  assert.equal(analytics.health().redis, 'unavailable');
+  stamp += 3_000;
+  assert.equal(await analytics.read(), undefined);
 });

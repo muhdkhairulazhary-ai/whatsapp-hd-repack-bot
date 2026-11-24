@@ -7,7 +7,7 @@ const MAX_USERS = 1000;
 const TTL = 31 * 86_400;
 
 const WRITE = `
-local day, id, stamp, cutoff, ttl = ARGV[1], ARGV[2], tonumber(ARGV[3]), ARGV[4], ARGV[5]
+local id, stamp, cutoff, ttl = ARGV[2], tonumber(ARGV[3]), ARGV[4], ARGV[5]
 local user, result, kind, method, duration = ARGV[6], ARGV[7], ARGV[8], ARGV[9], ARGV[10]
 local daily, seen, history, users, meta = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
 if redis.call('HEXISTS', seen, id) == 1 then return 0 end
@@ -92,6 +92,7 @@ export function createAnalytics({ command, namespace, key, now = Date.now }) {
   let dropped = 0;
   let redis = 'unknown';
   let cached;
+  let cacheExpiresAt = 0;
   let readInFlight;
   let readAfter = 0;
   const active = new Map();
@@ -128,9 +129,14 @@ export function createAnalytics({ command, namespace, key, now = Date.now }) {
     };
   }
 
+  function retainedSnapshot() {
+    if (now() >= cacheExpiresAt) cached = undefined;
+    return cached;
+  }
+
   async function read() {
     if (readInFlight) return readInFlight;
-    if (now() < readAfter) return cached;
+    if (now() < readAfter) return retainedSnapshot();
     readInFlight = (async () => {
       const stamp = now();
       const dates = Array.from({ length: 30 }, (_, i) => dayKey(stamp - (29 - i) * DAY));
@@ -141,7 +147,8 @@ export function createAnalytics({ command, namespace, key, now = Date.now }) {
         const jobs = rawJobs.flatMap(value => {
           try {
             const record = sanitize(JSON.parse(value));
-            return record.id && record.user && record.result ? [record] : [];
+            return record.id && record.user && record.result &&
+              record.finishedAt !== null && record.finishedAt >= stamp - RETENTION && record.finishedAt <= stamp ? [record] : [];
           } catch { return []; }
         });
         const counts = new Map();
@@ -150,7 +157,7 @@ export function createAnalytics({ command, namespace, key, now = Date.now }) {
         for (let i = 0; i + 1 < rawUsers.length; i += 2) {
           const id = rawUsers[i];
           const lastActive = Number(rawUsers[i + 1]);
-          if (/^[a-f0-9]{32}$/.test(id) && numeric(lastActive) !== null) {
+          if (/^[a-f0-9]{32}$/.test(id) && lastActive >= stamp - RETENTION && lastActive <= stamp) {
             people.push({ id, lastActive, jobs: counts.get(id) ?? 0 });
           }
         }
@@ -170,10 +177,13 @@ export function createAnalytics({ command, namespace, key, now = Date.now }) {
             days: days.slice(-7), readAt: stamp
           }
         };
+        cacheExpiresAt = Math.min((Math.floor(stamp / DAY) + 1) * DAY,
+          ...jobs.map(job => job.finishedAt + RETENTION),
+          ...people.map(person => person.lastActive + RETENTION));
         redis = 'available';
       } catch { redis = 'unavailable'; }
       finally { readAfter = now() + 12_000; }
-      return cached;
+      return retainedSnapshot();
     })().finally(() => { readInFlight = undefined; });
     return readInFlight;
   }

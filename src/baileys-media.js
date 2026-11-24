@@ -95,6 +95,21 @@ export function createMessageHandler({
   const sendText = (sock, jid, text) => Promise.resolve().then(() =>
     sock.sendMessage(jid, { text })).catch(() => {});
 
+  function observe(jid, kind, media) {
+    if (!telemetry) return;
+    try {
+      const job = telemetry.start(jid, kind, Number(media.fileLength));
+      const record = (method, ...values) => {
+        try { job[method](...values); } catch { /* Keep telemetry outside media delivery. */ }
+      };
+      return {
+        update: patch => record('update', patch),
+        finish: (result, error) => record('finish', result, error),
+        discard: () => record('discard')
+      };
+    } catch { return undefined; }
+  }
+
   function pump() {
     while (!stopping && active.size < workers && queue.length) {
       const job = queue.shift();
@@ -329,7 +344,7 @@ export function createMessageHandler({
       }
       if (key) accepted.add(key);
       jobs.push(new Promise(done => queue.push({ sock, jid, msg, media, kind, key, done, progress,
-        observation: telemetry?.start(jid, kind, Number(media.fileLength)) })));
+        observation: observe(jid, kind, media) })));
       pump();
       if (waiting && !progress) await sendText(sock, jid, '⏳ Fail anda dalam barisan pemprosesan.');
     }
