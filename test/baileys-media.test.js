@@ -26,6 +26,10 @@ test('Baileys video handler streams, repacks, replies and cleans up', async t =>
   const recorded = [];
   const stages = [];
   const handler = createMessageHandler({
+    telemetry: { start() {
+      const fail = () => { throw new Error('Synthetic telemetry failure'); };
+      return { update: fail, finish: fail, discard: fail };
+    } },
     accounts: { async record(jid, kind) { recorded.push([jid, kind]); } },
     maxBytes: input.length,
     tempRoot,

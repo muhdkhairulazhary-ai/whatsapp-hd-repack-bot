@@ -26,6 +26,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
   let socketRetries = 0;
   let storageRetries = 0;
   let connected = false;
+  let lastConnectedAt = null;
   let recoveryStartedAt = now();
   let status = { status: 'connecting' };
 
@@ -275,6 +276,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
           cancel(deadline);
           openedAt = now();
           connected = true;
+          lastConnectedAt = Date.now();
           report('already_linked', 'whatsapp_open');
           if (beforeOpen.length) dispatchMessages({ type: 'notify', messages: beforeOpen.splice(0) });
           if (restoring && typeof sock.ev.isBuffering === 'function') {
@@ -327,6 +329,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
   return {
     start,
     get connected() { return connected; },
+    get lastConnectedAt() { return lastConnectedAt; },
     requestPairing(refresh = false) {
       if (status.status === 'pairing_code_ready' && now() >= Date.parse(status.expiresAt)) {
         void active.close('pairing_phone_notification_missing');

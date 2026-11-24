@@ -228,3 +228,8 @@ The Smart Copy throughput figures describe remux throughput rather than encoded 
 The best isolated timing change was fast bilinear on 8-bit 30 fps, about 2.7% less encode time. It slowed the high-motion 60 fps fixture about 1.6%. Two decoder threads increased high-motion encode time about 14.8%. The two-encoder-thread outputs were slightly smaller (under 0.3%) with absolute SSIM differences below 0.00025. Other candidates produced the same measured sizes and SSIM as the baseline. Across candidates, measured peak cgroup usage stayed below 181 MiB for the accepted fixtures.
 
 **Decision:** retain the current production media path. FFmpeg accounted for roughly 90–96% of active HEVC time on these local fixtures. Input and output probes together accounted for most of the time outside muxing on the Smart Copy fixture. These measurements support keeping both probes and the existing single-thread encoder settings. The original large iPhone clips and live Render uploads were unavailable, so this PR makes no production speed claim. Rolling back this PR removes benchmark, tests, documentation and CI wiring. It requires no auth, data or configuration migration. [Full benchmark logs](https://github.com/muhdkhairulazhary-ai/whatsapp-hd-repack-bot/actions/runs/45207542912)
+
+## Shelby+ Control Center
+
+The optional owner-only dashboard uses the existing Baileys HTTP server and Upstash Redis endpoint.
+[Configure it from an iPhone and review retention and security](DASHBOARD.md).

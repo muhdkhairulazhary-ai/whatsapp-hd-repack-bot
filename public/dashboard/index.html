@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0d0e10"><title>Shelby+ Control Center</title>
+<link rel="stylesheet" href="/dashboard/style.css"><link rel="manifest" href="/dashboard/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/dashboard/apple-touch-icon.png"><script defer src="/dashboard/app.js"></script>
+</head>
+<body>
+<aside class="rail">
+  <div class="brand"><img src="/dashboard/icon.svg" alt="" width="37" height="37"><div>SHELBY<span class="accent">+</span><small>Control Center</small></div></div>
+  <nav aria-label="Dashboard">
+    <button data-view="overview" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Overview</button>
+    <button data-view="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>Jobs</button>
+    <button data-view="users"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="3"/><path d="M4 20v-2a6 6 0 0 1 12 0v2m2-9a3 3 0 0 1 0 6"/></svg>Users</button>
+    <button data-view="system"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12h4l3-7 5 14 3-7h5"/></svg>System</button>
+  </nav>
+  <div class="rail-end">Owner access</div>
+</aside>
+<main class="workspace">
+  <header class="topbar">
+    <div class="brand mobile-brand"><img src="/dashboard/icon.svg" alt="" width="32" height="32"><span>SHELBY<span class="accent">+</span></span></div>
+    <span id="updated">Connecting…</span>
+    <button id="logout" class="quiet" type="button">Sign out</button>
+  </header>
+  <div class="hero"><div><p class="kicker">CONTROL CENTER</p><h1 id="heading">Overview</h1><p id="subtitle">Video delivery, activity, and service health.</p></div><span id="connection" class="badge">Checking WhatsApp</span></div>
+  <p id="warning" class="notice" role="status" hidden></p>
+  <section id="view" aria-labelledby="heading"></section>
+  <footer>Shelby+ Control Center <span>Read-only monitoring</span></footer>
+</main>
+</body>
+</html>

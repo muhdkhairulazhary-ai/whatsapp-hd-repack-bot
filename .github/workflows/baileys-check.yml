@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
       - name: Check syntax
-        run: for file in src/*.js test/*.js scripts/*.js; do node --check "$file" || exit; done
+        run: for file in src/*.js src/admin/*.js public/dashboard/*.js test/*.js scripts/*.js; do node --check "$file" || exit; done
       - name: Install media tools
         run: sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick libheif-plugin-libde265 redis-server
       - name: Run tests
@@ -33,3 +33,16 @@ jobs:
       - name: Benchmark Turbo candidates in the 512 MiB Docker image
         if: github.event_name == 'workflow_dispatch'
         run: docker run --rm --cpus=1 --memory=512m --memory-swap=512m whatsapp-hd-baileys:test node scripts/benchmark-turbo.js
+      - name: Benchmark Control Center in the 512 MiB Docker image
+        run: docker run --rm --cpus=1 --memory=512m --memory-swap=512m whatsapp-hd-baileys:test node scripts/benchmark-dashboard.js
+      - name: Verify Control Center UI and capture fixture screenshots
+        run: |
+          npm install --prefix "$RUNNER_TEMP/shelby-ui" --no-audit --no-fund playwright@1.56.1
+          "$RUNNER_TEMP/shelby-ui/node_modules/.bin/playwright" install --with-deps chromium webkit
+          node scripts/check-dashboard-ui.js "$RUNNER_TEMP/shelby-ui/node_modules/playwright/index.mjs" "$RUNNER_TEMP/shelby-screenshots"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: control-center-fixtures
+          path: ${{ runner.temp }}/shelby-screenshots
+          if-no-files-found: ignore
