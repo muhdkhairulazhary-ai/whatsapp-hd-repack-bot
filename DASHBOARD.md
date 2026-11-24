@@ -18,7 +18,7 @@ These are manual steps for after you approve the change and choose to deploy it.
    | Variable | Value |
    | --- | --- |
    | `SHELBY_ADMIN_ENABLED` | `1` |
-   | `SHELBY_ADMIN_ORIGIN` | `https://your-render-service.onrender.com`, with no trailing slash |
+   | `SHELBY_ADMIN_ORIGIN` | `https://your-render-service.onrender.com`, with an optional trailing slash. Use only the HTTPS service URL |
    | `SHELBY_ADMIN_TOKEN` | First 43-character secret |
    | `SHELBY_ANALYTICS_KEY` | Second 43-character secret. Keep stable for consistent user IDs |
    | `BAILEYS_AUTH_REDIS_URL` | Existing HTTPS Upstash REST endpoint |
@@ -27,7 +27,7 @@ These are manual steps for after you approve the change and choose to deploy it.
 4. Save and deploy only when ready. Open `https://your-render-service.onrender.com/dashboard` in Safari and paste the administrator token into the sign-in form. The dashboard uses the exact configured origin.
 5. To add it to the Home Screen, tap Safari’s Share button, then **Add to Home Screen**. The Home Screen app may require its own sign-in. There is no service worker or offline copy of private data.
 
-Configuration is required even if the bot already connects to WhatsApp. Missing or invalid dashboard settings leave dashboard routes disabled. The health URL remains public. Only the Baileys start command serves this dashboard.
+Configuration is required even if the bot already connects to WhatsApp. When enabled with invalid settings, `/dashboard` returns a generic 503 and the startup log lists the first invalid variable by name. Values are never logged. Look for **Control Center startup** in Render Logs. A `ready` entry confirms that settings and assets loaded. Redis reachability is checked separately when analytics run. A deliberately disabled dashboard returns 404. A healthy `/health` alone cannot confirm dashboard startup. The Docker default command and `npm run start:baileys` both serve the dashboard. The separate `npm start` server does not serve it.
 
 ## Metrics and retention
 

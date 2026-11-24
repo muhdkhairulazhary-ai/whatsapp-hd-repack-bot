@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { adminConfig, createAdmin } from '../src/admin/admin.js';
+import { adminConfig, createAdmin, startAdmin } from '../src/admin/admin.js';
 import { createAnalytics } from '../src/admin/analytics.js';
 import { createBaileysHandler } from '../src/baileys-http.js';
 
@@ -243,4 +243,38 @@ test('a Redis outage does not extend the history retention cutoff', async () => 
   assert.equal(analytics.health().redis, 'unavailable');
   stamp += 3_000;
   assert.equal(await analytics.read(), undefined);
+});
+
+test('dashboard startup normalizes an origin root and identifies invalid settings without exposing values', async t => {
+  const records = [];
+  const log = { info: data => records.push(data), warn: data => records.push(data) };
+  const env = { ...authEnv, SHELBY_ADMIN_ORIGIN: origin + '/' };
+  const ready = await serve(t, startAdmin({ env, log }));
+  assert.equal((await ready('/dashboard')).status, 401);
+  assert.equal((await ready('/dashboard/app.js')).status, 200);
+  const login = await ready('/api/admin/login', loginOptions());
+  assert.equal(login.status, 200);
+  assert.deepEqual(records.pop(), { state: 'ready' });
+
+  const invalidCases = {
+    SHELBY_ADMIN_ENABLED: 'true',
+    SHELBY_ADMIN_ORIGIN: origin + '/dashboard',
+    SHELBY_ADMIN_TOKEN: 'synthetic-invalid-token',
+    SHELBY_ANALYTICS_KEY: token,
+    BAILEYS_AUTH_REDIS_URL: 'http://redis.example.test',
+    BAILEYS_AUTH_REDIS_TOKEN: undefined
+  };
+  for (const [variable, value] of Object.entries(invalidCases)) {
+    const admin = startAdmin({ env: { ...env, [variable]: value }, log });
+    const get = await serve(t, admin);
+    const unavailable = await get('/dashboard');
+    assert.equal(unavailable.status, 503);
+    assert.equal(unavailable.headers.get('cache-control'), 'no-store');
+    assert.equal(await unavailable.text(), 'Control Center unavailable. See the service startup logs.');
+    assert.equal((await get('/api/admin/login', loginOptions())).status, 404);
+    assert.deepEqual(await (await get('/health')).json(), { status: 'ok' });
+    assert.deepEqual(records.pop(), { state: 'unavailable', reason: 'invalid_setting', variable });
+  }
+  assert.equal(startAdmin({ env: { ...env, SHELBY_ADMIN_ENABLED: '0' }, log }), null);
+  assert.deepEqual(records, []);
 });

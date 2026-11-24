@@ -13,7 +13,7 @@ import { createBaileysDiagnosticLogger, pairingBrowser, requestConfirmedPairingC
 import { createRemoteAuthLoader } from './baileys-remote-auth.js';
 import { createShutdown } from './runtime-diagnostics.js';
 import { createBaileysHandler } from './baileys-http.js';
-import { createAdmin } from './admin/admin.js';
+import { startAdmin } from './admin/admin.js';
 
 const log = pino({ level: process.env.LOG_LEVEL || 'info' });
 const authDir = process.env.BAILEYS_AUTH_DIR || './baileys-auth';
@@ -24,20 +24,15 @@ const pairingToken = process.env.PAIRING_ACCESS_TOKEN || '';
 const privateLogger = pino({ level: 'silent' });
 process.umask(0o077);
 
-let admin;
-try {
-  admin = createAdmin({
-    connection: {
-      get connected() { return connection.connected; },
-      get lastConnectedAt() { return connection.lastConnectedAt; }
-    },
-    media: { snapshot: () => onMessages.snapshot() },
-    version: process.env.RENDER_GIT_COMMIT
-  });
-} catch {
-  log.warn('Control Center assets unavailable');
-}
-if (!admin && process.env.SHELBY_ADMIN_ENABLED === '1') log.warn('Control Center disabled');
+const admin = startAdmin({
+  log,
+  connection: {
+    get connected() { return connection.connected; },
+    get lastConnectedAt() { return connection.lastConnectedAt; }
+  },
+  media: { snapshot: () => onMessages.snapshot() },
+  version: process.env.RENDER_GIT_COMMIT
+});
 
 const accounts = createAccountStore(process.env.BOT_ACCOUNTS_DIR || './shelby-accounts');
 const onMessages = createMessageHandler({ downloadMediaMessage, log, privateLogger, accounts, telemetry: admin?.telemetry });
@@ -68,7 +63,7 @@ const connection = createConnectionManager({
 const baseHandler = createBaileysHandler(connection, pairingToken);
 const server = http.createServer((req, res) => {
   if (!admin || !/^\/(?:dashboard|api\/admin)(?:[/?]|$)/.test(req.url)) return baseHandler(req, res);
-  void admin.route(req, res).then(handled => {
+  void Promise.resolve().then(() => admin.route(req, res)).then(handled => {
     if (!handled) baseHandler(req, res);
   }).catch(() => {
     if (res.headersSent) return res.destroy();

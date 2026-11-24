@@ -26,6 +26,14 @@ jobs:
         run: npm test
       - name: Build Docker image
         run: docker build -t whatsapp-hd-baileys:test .
+      - name: Reproduce the startup 404 at the affected deployment revision
+        if: github.event_name == 'pull_request' && github.event.pull_request.base.sha == 'c2070878f71e6dc4af3651d6c8773b1d7cc8d238'
+        run: |
+          git fetch --depth=1 origin c2070878f71e6dc4af3651d6c8773b1d7cc8d238
+          git archive FETCH_HEAD | docker build -t shelby-dashboard:affected -
+          bash scripts/check-dashboard-startup.sh shelby-dashboard:affected deployed
+      - name: Smoke-test the dashboard in the production entrypoint
+        run: bash scripts/check-dashboard-startup.sh whatsapp-hd-baileys:test
       - name: Test media processing in the 512 MiB Docker image
         run: docker run --rm --memory=512m --memory-swap=512m whatsapp-hd-baileys:test node --test --test-concurrency=1 test/baileys-media.test.js test/shelby.test.js test/video-size.test.js test/ffmpeg-diagnostics.test.js test/video-progress.test.js test/turbo-engine.test.js
       - name: Benchmark video size control in the 512 MiB Docker image

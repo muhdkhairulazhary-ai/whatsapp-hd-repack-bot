@@ -17,21 +17,75 @@ const assetTypes = {
 };
 const readAsset = file => readFileSync(new URL('../../public/dashboard/' + file, import.meta.url));
 
-export function adminConfig(env = process.env) {
-  if (env.SHELBY_ADMIN_ENABLED !== '1') return null;
+function httpsRoot(value) {
   try {
-    const origin = new URL(env.SHELBY_ADMIN_ORIGIN);
-    const redis = new URL(env.BAILEYS_AUTH_REDIS_URL);
-    const token = env.SHELBY_ADMIN_TOKEN;
-    const redisToken = env.BAILEYS_AUTH_REDIS_TOKEN?.trim();
-    const key = env.SHELBY_ANALYTICS_KEY;
-    if (origin.protocol !== 'https:' || origin.origin !== env.SHELBY_ADMIN_ORIGIN ||
-        redis.protocol !== 'https:' || redis.username || redis.password || redis.search || redis.hash || redis.pathname !== '/' ||
-        !redisToken || !secret(token) || !secret(key) || token === key ||
-        [env.PAIRING_ACCESS_TOKEN, redisToken].some(value => [token, key].includes(value)) ||
-        [token, key].some(value => Buffer.from(value, 'base64url').toString('base64') === env.BAILEYS_AUTH_ENCRYPTION_KEY?.trim())) return null;
-    return { origin: origin.origin, redis: redis.href, redisToken, token, key };
-  } catch { return null; }
+    const url = new URL(value);
+    if (url.protocol === 'https:' && (value === url.origin || value === url.origin + '/')) return url;
+  } catch { /* Missing or invalid URL. */ }
+}
+
+function redisEndpoint(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:' && !url.username && !url.password && !url.search &&
+        !url.hash && url.pathname === '/') return url;
+  } catch { /* Missing or invalid Redis endpoint. */ }
+}
+
+function inspectConfig(env) {
+  const enabled = env.SHELBY_ADMIN_ENABLED?.trim();
+  if (!enabled || enabled === '0') return { state: 'disabled' };
+  const invalid = variable => ({ state: 'unavailable', reason: 'invalid_setting', variable });
+  if (enabled !== '1') return invalid('SHELBY_ADMIN_ENABLED');
+
+  const origin = httpsRoot(env.SHELBY_ADMIN_ORIGIN?.trim());
+  const redis = redisEndpoint(env.BAILEYS_AUTH_REDIS_URL);
+  const token = env.SHELBY_ADMIN_TOKEN;
+  const key = env.SHELBY_ANALYTICS_KEY;
+  const redisToken = env.BAILEYS_AUTH_REDIS_TOKEN?.trim();
+  if (!origin) return invalid('SHELBY_ADMIN_ORIGIN');
+  if (!redis) return invalid('BAILEYS_AUTH_REDIS_URL');
+  if (!redisToken) return invalid('BAILEYS_AUTH_REDIS_TOKEN');
+
+  const independentSecret = value => secret(value) &&
+    ![env.PAIRING_ACCESS_TOKEN, redisToken].includes(value) &&
+    Buffer.from(value, 'base64url').toString('base64') !== env.BAILEYS_AUTH_ENCRYPTION_KEY?.trim();
+  if (!independentSecret(token)) return invalid('SHELBY_ADMIN_TOKEN');
+  if (!independentSecret(key) || token === key) return invalid('SHELBY_ANALYTICS_KEY');
+  return { state: 'ready', config: { origin: origin.origin, redis: redis.href, redisToken, token, key } };
+}
+
+export function adminConfig(env = process.env) {
+  return inspectConfig(env).config ?? null;
+}
+
+export function startAdmin({ env = process.env, log, ...options }) {
+  const { state, reason, variable, config } = inspectConfig(env);
+  if (state === 'disabled') return null;
+  if (config) {
+    try {
+      const admin = createAdmin({ ...options, config });
+      log.info({ state: 'ready' }, 'Control Center startup');
+      return admin;
+    } catch {
+      log.warn({ state: 'unavailable', reason: 'initialization_failed' }, 'Control Center startup');
+    }
+  } else {
+    log.warn({ state, reason, variable }, 'Control Center startup');
+  }
+  return {
+    route(req, res) {
+      if (req.method !== 'GET' || req.url.split('?', 1)[0] !== '/dashboard') return false;
+      res.writeHead(503, {
+        'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Security-Policy': POLICY,
+        'X-Content-Type-Options': 'nosniff'
+      });
+      res.end('Control Center unavailable. See the service startup logs.');
+      return true;
+    }
+  };
 }
 
 function readJson(req) {
