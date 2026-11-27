@@ -66,7 +66,7 @@ function commandText(message) {
 }
 
 export function createMessageHandler({
-  downloadMediaMessage, log, privateLogger, accounts, tempRoot = os.tmpdir(),
+  downloadMediaMessage, log, privateLogger, accounts, tokenDiagnostics, tempRoot = os.tmpdir(),
   concurrency = Number(process.env.BOT_MEDIA_CONCURRENCY ?? 1),
   queueCapacity = Number(process.env.BOT_MEDIA_QUEUE_SIZE ?? 4),
   jobTimeoutMs = Number(process.env.BOT_MEDIA_JOB_TIMEOUT_MS ?? 900_000),
@@ -377,10 +377,14 @@ export function createMessageHandler({
           continue;
         }
         diagnostic('reply_prepared');
-        const receipt = commandReceipts.track(sock, (stage, statusCode) => diagnostic(stage, { statusCode }));
+        const receipt = commandReceipts.track(sock, (stage, statusCode) => {
+          diagnostic(stage, { statusCode });
+          if (stage === 'server_rejected') void tokenDiagnostics?.rejected(sock, trace, statusCode);
+        });
         diagnostic('sending', { route: address, trackingReceipt: Boolean(receipt) });
         try {
-          await sock.sendMessage(jid, { text: reply }, receipt ? { messageId: receipt.messageId } : undefined);
+          const send = () => sock.sendMessage(jid, { text: reply }, receipt ? { messageId: receipt.messageId } : undefined);
+          await (tokenDiagnostics ? tokenDiagnostics.run(trace, send) : send());
           diagnostic('send_resolved');
         } catch (error) {
           receipt?.cancel();
