@@ -304,12 +304,20 @@ export function createMessageHandler({
       const media = payload.videoMessage || payload.imageMessage || document;
       if (!media) {
         const text = payload.conversation || payload.extendedTextMessage?.text || '';
+        let reply;
         try {
-          const reply = await commandReply(text, jid, accounts);
-          if (reply) await sendText(sock, jid, reply);
+          reply = await commandReply(text, jid, accounts);
         } catch {
           log.error({ stage: 'account', reason: 'account_command_failed' }, 'Account command failed');
-          await sendText(sock, jid, unavailable);
+          reply = unavailable;
+        }
+        if (reply) {
+          try {
+            await sock.sendMessage(jid, { text: reply });
+          } catch (error) {
+            const { statusCode, reason } = failureDetails(error, 'command_reply', false);
+            log.warn?.({ stage: 'command_reply', reason: statusCode === 408 ? 'timeout' : reason, statusCode }, 'WhatsApp command reply failed');
+          }
         }
         continue;
       }
