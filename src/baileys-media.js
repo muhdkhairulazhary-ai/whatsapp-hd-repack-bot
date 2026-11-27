@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+import { createCommandReceipts } from './baileys-command-receipts.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -54,6 +56,22 @@ function replyFor({ stage, reason, limitBytes, limitSeconds }) {
   return userMessages[reason] || userMessages[stage] || 'Video gagal diproses. Sila cuba fail MP4 atau MOV yang lebih pendek.';
 }
 
+function commandText(message) {
+  // Match Baileys' bounded wrapper traversal without dispatching edited messages.
+  for (let i = 0; i < 5 && message?.ephemeralMessage; i++) message = message.ephemeralMessage.message;
+  const text = message?.conversation || message?.extendedTextMessage?.text;
+  return typeof text === 'string' ? text : '';
+}
+
+function commandDestination(sock, key, jid) {
+  if (!jid.endsWith('@lid') || !sock.authState || sock.authState.creds?.me?.lid) return jid;
+  // Baileys 6.7.24 dereferences the account LID during LID relay. The decoder
+  // can provide a PN for this sender in the authenticated direct-message stanza.
+  if (key.senderLid && jidNormalizedUser(key.senderLid) !== jid) return null;
+  const address = jidNormalizedUser(key.senderPn || '');
+  return /^\d+@s\.whatsapp\.net$/.test(address) ? address : null;
+}
+
 export function createMessageHandler({
   downloadMediaMessage, log, privateLogger, accounts, tempRoot = os.tmpdir(),
   concurrency = Number(process.env.BOT_MEDIA_CONCURRENCY ?? 1),
@@ -91,6 +109,7 @@ export function createMessageHandler({
   // Also bound jobs whose final edit is still paced after delivery.
   const progressCapacity = queueCapacity + workers + 4;
   let stopping = false;
+  const commandReceipts = createCommandReceipts();
 
   const sendText = (sock, jid, text) => Promise.resolve().then(() =>
     sock.sendMessage(jid, { text })).catch(() => {});
@@ -286,14 +305,26 @@ export function createMessageHandler({
   }
 
   async function handleMessages(sock, { messages, type }) {
-    if (stopping || type !== 'notify') return;
+    if (stopping || type !== 'notify' || !Array.isArray(messages)) return;
     const jobs = [];
     for (const msg of messages) {
       if (stopping) break;
-      const jid = jidNormalizedUser(msg.key.remoteJid || '');
-      if (!/@(?:s\.whatsapp\.net|lid)$/.test(jid) || msg.key.fromMe || !msg.message) continue;
-      const key = msg.key.id && `${jid}:${msg.key.id}`;
-      if (key && (seen.has(key) || accepted.has(key))) continue;
+      if (!msg) continue;
+      const messageKey = msg.key ?? {};
+      const jid = jidNormalizedUser(messageKey.remoteJid || '');
+      const text = commandText(msg.message);
+      const candidate = text.trimStart().startsWith(branding.prefix) || /^\s*(ping|menu|help)(?:\s|$)/i.test(text);
+      const trace = candidate ? randomBytes(8).toString('hex') : undefined;
+      const address = jid.endsWith('@lid') ? 'lid' : jid.endsWith('@s.whatsapp.net') ? 'pn' : 'other';
+      const diagnostic = (stage, fields) => log.info?.({ trace, stage, address, ...fields }, 'WhatsApp command');
+      if (trace) diagnostic('received');
+      const key = messageKey.id && `${jid}:${messageKey.id}`;
+      const skipped = messageKey.fromMe ? 'own_message' : address === 'other' ? 'unsupported_chat' :
+        !msg.message ? 'missing_body' : key && (seen.has(key) || accepted.has(key)) ? 'duplicate' : null;
+      if (skipped) {
+        if (trace) diagnostic('filtered', { reason: skipped });
+        continue;
+      }
       if (key) {
         seen.add(key);
         if (seen.size > 2048) seen.delete(seen.values().next().value);
@@ -303,21 +334,35 @@ export function createMessageHandler({
       const document = payload.documentMessage;
       const media = payload.videoMessage || payload.imageMessage || document;
       if (!media) {
-        const text = payload.conversation || payload.extendedTextMessage?.text || '';
+        if (!trace) continue;
+        diagnostic('handler_invoked');
         let reply;
         try {
           reply = await commandReply(text, jid, accounts);
         } catch {
           log.error({ stage: 'account', reason: 'account_command_failed' }, 'Account command failed');
+          diagnostic('handler_failed');
           reply = unavailable;
         }
-        if (reply) {
-          try {
-            await sock.sendMessage(jid, { text: reply });
-          } catch (error) {
-            const { statusCode, reason } = failureDetails(error, 'command_reply', false);
-            log.warn?.({ stage: 'command_reply', reason: statusCode === 408 ? 'timeout' : reason, statusCode }, 'WhatsApp command reply failed');
-          }
+        if (!reply) {
+          diagnostic('no_reply', { reason: 'unrecognized_command' });
+          continue;
+        }
+        diagnostic('reply_prepared');
+        const destination = commandDestination(sock, messageKey, jid);
+        if (!destination) {
+          diagnostic('reply_blocked', { reason: 'missing_own_lid_and_sender_pn' });
+          continue;
+        }
+        const receipt = commandReceipts.track(sock, (stage, statusCode) => diagnostic(stage, { statusCode }));
+        diagnostic('sending', { route: destination !== jid ? 'sender_pn' : address, trackingReceipt: Boolean(receipt) });
+        try {
+          await sock.sendMessage(destination, { text: reply }, receipt ? { messageId: receipt.messageId } : undefined);
+          diagnostic('send_resolved');
+        } catch (error) {
+          receipt?.cancel();
+          const { statusCode, reason } = failureDetails(error, 'command_reply', false);
+          log.warn?.({ trace, stage: 'command_reply', reason: statusCode === 408 ? 'timeout' : reason, statusCode }, 'WhatsApp command reply failed');
         }
         continue;
       }
@@ -362,6 +407,7 @@ export function createMessageHandler({
   handleMessages.snapshot = () => ({ activeJobs: active.size, queuedJobs: queue.length });
   handleMessages.stop = async () => {
     stopping = true;
+    commandReceipts.stop();
     for (const progress of progressMessages) progress.close();
     for (const job of queue.splice(0)) {
       job.observation?.discard();
