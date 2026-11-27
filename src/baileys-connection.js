@@ -213,7 +213,8 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         connected = false;
         if (openedAt !== undefined) recoveryStartedAt = now();
         const hadCode = status.status === 'pairing_code_ready';
-        const expired = reason === 'pairing_phone_notification_missing' || (hadCode && alreadyClosed);
+        const expired = !terminal.has(statusCode) &&
+          (reason === 'pairing_phone_notification_missing' || (hadCode && alreadyClosed));
         const waitForManualRetry = expired || reason === 'pairing_hello_rejected' ||
           reason === 'pairing_phone_reference_mismatch' || phoneConfirmationReceived || signedPairReceived;
         cancel(deadline);
@@ -232,13 +233,10 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         await auth.release?.();
         active = undefined;
         if (stopped) return;
+        if (terminal.has(statusCode)) return;
         if (saveFailed) {
           report('connection_failed', 'credential_storage_failed');
           if (auth.release) scheduleRetry(pairing, 'credential_storage_failed', statusCode, true);
-          return;
-        }
-        if (terminal.has(statusCode)) {
-          report('connection_failed', reason, statusCode);
           return;
         }
         if (openedAt !== undefined && now() - openedAt >= 60_000) {
@@ -334,7 +332,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
       if (status.status === 'pairing_code_ready' && now() >= Date.parse(status.expiresAt)) {
         void active.close('pairing_phone_notification_missing');
       }
-      if (!active && !starting && !retryTimer && !stopped && phone &&
+      if (!active && !starting && !retryTimer && !stopped && phone && status.reason !== 'logged_out' &&
           (status.reason === 'pairing_required' ||
            (refresh && ['connection_failed', 'pairing_code_expired'].includes(status.status)))) {
         socketRetries = 0;

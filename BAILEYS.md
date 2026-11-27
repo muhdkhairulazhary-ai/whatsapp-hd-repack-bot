@@ -15,10 +15,21 @@ The feature branch runs a WhatsApp Linked Devices companion using Baileys. The C
 2. Add **Get Contents of URL**, select **POST**, and under **Headers** add `Authorization` with value `Bearer YOUR_TOKEN`. Leave the body empty. Add **Show Result** to display the response. Keep this shortcut private because its configuration contains your token.
 3. Run the shortcut. Run it again after a few seconds while the status is `connecting` or `waiting_for_whatsapp`. Read the `code` when the status is `pairing_code_ready`. The bot shows the code after WhatsApp acknowledges the registration request and returns a pairing reference. The same code stays available for up to 60 seconds, or until the phone responds or the socket closes.
 4. In WhatsApp, open **Settings → Linked Devices → Link a Device → Link with phone number instead** and enter the code. The phone-number option may also appear in a WhatsApp notification. Run the authenticated pairing shortcut again and look for `already_linked`.
-5. If you see `pairing_code_expired` or `connection_failed`, add `?refresh=1` to the shortcut URL and run it again. Refresh starts a new attempt once the previous one has stopped. If failures repeat, use the response's `reason` and numeric `statusCode` when troubleshooting. For a logged-out or invalid saved session, preserve the old directory and use a fresh private directory only when you intend to link again. For a replaced connection, check for another running instance using the same session.
+5. If you see `pairing_code_expired` or `connection_failed`, add `?refresh=1` to the shortcut URL and run it again. Refresh starts a new attempt once the previous one has stopped. If failures repeat, use the response's `reason` and numeric `statusCode` when troubleshooting. For a revoked Redis session, follow the recovery steps below. For a replaced connection, check for another running instance using the same session.
 6. Ask another WhatsApp user to send `.ping` and a short MP4. The bot ignores messages sent by its own account.
 
 A QR fallback normally requires displaying the QR on a second screen so the iPhone camera can scan it. Phone-number pairing works with a single device. This deployment keeps the QR challenge private and uses it internally to time the code request.
+
+## Recover a revoked Redis session (401)
+
+A WhatsApp `logged_out` with status code `401` requires linking again. A Render restart reloads the same saved credentials if the session ID stays the same. Use a new session ID to recover without deleting any Redis records.
+
+1. In Render, open **whatsapp-hd-repack-bot-1 → Environment**. Set `BAILEYS_AUTH_SESSION_ID` to a new, previously unused ID such as `shelby-recovery-20261127`. Use up to 64 letters, digits, underscores or hyphens.
+2. Unset `BAILEYS_AUTH_MIGRATE_LOCAL` or set it to `0` to avoid importing the revoked snapshot. Keep the existing Redis URL, REST token, encryption key, phone number, pairing token and all dashboard variables. Keep one running instance.
+3. When ready, apply the change and manually deploy. Run the private `POST /pairing` shortcut above and immediately enter its code in WhatsApp. When the endpoint reports `already_linked`, keep the new session ID on subsequent deploys.
+4. Test with an incoming message from another account. If a new code is needed after expiry, use `?refresh=1` on the new session.
+
+The Redis auth state and lease use `shelby:auth:{SESSION_ID}:state` and `shelby:auth:{SESSION_ID}:lease`. The old auth snapshot remains encrypted. Dashboard analytics and job history use a separate namespace, and registrations use `BOT_ACCOUNTS_DIR`. On Render Free, registrations on ephemeral disk may be lost when the container is replaced. If that directory is ephemeral and registrations must survive, recover and preserve the private files before redeploying.
 
 ## Hosting and session persistence
 
