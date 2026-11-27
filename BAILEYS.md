@@ -252,7 +252,20 @@ After an approved deployment, set `SHELBY_WA_TOKEN_DIAGNOSTICS=1` only for a sho
 
 - `native_lookup` reports the lookup address family, token freshness, and whether the token was attached to the outgoing stanza. `alternate_pn_lookup` checks the PN slot only when the native LID slot lacks a fresh token and Baileys supplies a trusted mapping. A fresh alternate and a missing native token identify the orphaned-slot case. The alternate read never contributes a token to the send.
 - `token_stored` reports the address family after an accepted write. `token_acquisition` reports whether a particular notification or IQ path stored a fresh token. Background notifications and recovery queries may lack a command trace.
-- `reachout_status` uses Baileys' native status query on the existing connection after a tracked 463, once per socket and at most once per minute. `inactive` reports the query result and does not rule out other policy or device-specific rejections.
+- Outbound restriction status is logged independently of the token diagnostics flag. Filter for `WhatsApp outbound delivery state` or check Control Center. An `available` state does not rule out other policy or device-specific rejections.
 - `history_notification` records whether an incoming history notification was processed. PR #19's disabled history import also skips v7's history-based token and LID seeding. Native live token notifications and IQ paths still run. Leave history policy unchanged until production evidence identifies the missing path.
 
 The logs contain no addresses, credentials, tokens, protocol frames or message bodies. There is no message replay, token transfer, or authentication reset.
+
+## Shelby+ V2.1 HDR Preserve (Beta)
+
+- Use `.hdr on` to enable HDR preservation for your account, `.hdr off` to return to the standard HD workflow, and `.hdr` to check your setting. The default is off. With the setting off, the bot warns before standard conversion of detected HDR sources.
+- HDR Preserve supports compatible HEVC Main 10 HLG or HDR10 from MOV or MP4, with AAC-LC audio or no audio. The limits remain 150 MB and 60 seconds. The bot remuxes to MP4 and verifies compressed packet hashes and timing, codec headers, display orientation and color signaling. HDR metadata embedded in the HEVC bitstream stays with the original packets.
+- Incompatible HDR, including Dolby Vision, receives a clear rejection in HDR mode. Files that fail verification or exceed the output limit also receive a rejection. This path never starts an HDR encoder, including for 4K. WhatsApp Status may still recompress the video or convert HDR to SDR.
+- Existing Upstash deployments store HDR preferences in the separate `shelby:preferences:hdr:` namespace. Keys use a domain-separated HMAC of the account identifier and survive WhatsApp session ID changes. Local deployments without Upstash use the existing account store. A local store on Render Free's ephemeral filesystem may lose changes when the instance is replaced.
+
+### Delivery suspension and network recovery
+
+An outbound WhatsApp ACK 463 alone does not establish that an account restriction is active. It pauses new sends for at least 60 seconds while the bot checks the native, read-only reachout status. An active restriction keeps delivery suspended until WhatsApp explicitly reports it inactive. Failed status checks leave an existing suspension in effect. The bot does not replay rejected or suspended replies. After recovery, send a new command or video. The Control Center shows the outbound state independently of WhatsApp connectivity.
+
+Ordinary linked network disconnects use up to six exponentially spaced reconnect attempts. Temporary network failures keep encrypted Redis authentication. Confirmed terminal session failures stop the reconnect loop and require operator review. Dashboard diagnostics also distinguish the active media worker count, waiting capacity, last media failure, and available container memory readings.

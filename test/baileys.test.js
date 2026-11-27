@@ -377,3 +377,24 @@ test('live socket policy enables server props, skips history import and delivers
   await manager.stop();
   await handler.stop();
 });
+
+test('linked network failures have one bounded retry at a time and a terminal logout stays terminal', async () => {
+  const { manager, http, sockets, advance, timers } = setup({ creds: { account: {} } });
+  await manager.start();
+  for (const delay of [1000, 2000, 4000, 8000, 16000, 32000]) {
+    const socket = sockets.at(-1);
+    disconnect(socket, 428);
+    disconnect(socket, 428);
+    await flush();
+    assert.equal(timers.size, 1);
+    await advance(delay);
+  }
+  assert.equal(sockets.length, 7);
+  disconnect(sockets.at(-1), 401);
+  await flush();
+  assert.equal(http('/pairing?refresh=1').result.reason, 'logged_out');
+  await advance(64000);
+  assert.equal(sockets.length, 7);
+  assert.equal(timers.size, 0);
+  await manager.stop();
+});

@@ -6,8 +6,6 @@ const sources = new Set(['notification', 'recovery', 'outbound']);
 
 export function createTokenDiagnostics(log) {
   const context = new AsyncLocalStorage();
-  const visited = new WeakSet();
-  let nextProbeAt = 0;
   const report = (stage, fields) => log.info({ stage, trace: context.getStore(), ...fields }, 'WhatsApp privacy diagnostic');
 
   function native(fields, message) {
@@ -32,22 +30,5 @@ export function createTokenDiagnostics(log) {
     }
   }
 
-  async function rejected(sock, trace, statusCode) {
-    // rc14 consumes 463 before its generic timelock branch. Use its existing
-    // read-only status query at most once per socket and once per minute.
-    if (statusCode !== 463 || visited.has(sock) || typeof sock.fetchAccountReachoutTimelock !== 'function' ||
-        !sock.ws?.isOpen || Date.now() < nextProbeAt) return;
-    visited.add(sock);
-    nextProbeAt = Date.now() + 60_000;
-    await context.run(trace, async () => {
-      try {
-        const { isActive } = await sock.fetchAccountReachoutTimelock();
-        report('reachout_status', { outcome: typeof isActive === 'boolean' ? (isActive ? 'active' : 'inactive') : 'unavailable' });
-      } catch {
-        report('reachout_status', { outcome: 'unavailable' });
-      }
-    });
-  }
-
-  return { native, rejected, run: (trace, fn) => context.run(trace, fn) };
+  return { native, run: (trace, fn) => context.run(trace, fn) };
 }

@@ -20,6 +20,9 @@ const UPLOAD_TIMEOUT_MS = 60_000;
 
 const unavailable = 'Perkhidmatan tidak tersedia buat sementara waktu. Sila cuba lagi.';
 const userMessages = {
+  hdr_unsupported: 'HDR Preserve tidak menyokong trek video atau audio ini. Hantar HEVC Main 10 HLG/HDR10 yang serasi atau pilih .hdr off untuk mod HD biasa.',
+  hdr_metadata_changed: 'HDR tidak dapat disahkan selepas pembungkusan semula. Video tidak ditukar ke SDR.',
+  hdr_preference_unavailable: 'Tetapan HDR tidak dapat dibaca buat sementara waktu. Sila cuba lagi.',
   unsupported_image: 'Format gambar tidak disokong. Sila hantar JPEG, PNG atau HEIC.',
   image_conversion_failed: 'Gambar gagal diproses. Fail mungkin rosak atau format ini tidak disokong.',
   image_pixel_limit: 'Resolusi gambar melebihi had 50 megapiksel.',
@@ -45,6 +48,7 @@ function failureDetails(error, stage, downloadTimedOut) {
   let reason = 'operation_failed';
   if (downloadTimedOut || ['ETIMEDOUT', 'ECONNABORTED'].includes(error?.code)) reason = 'timeout';
   if (stage === 'upload' && (error?.response?.status === 413 || error?.output?.statusCode === 413)) reason = 'upload_size_rejected';
+  if (error?.code === 'reachout_restricted') reason = 'reachout_restricted';
   if (error?.code === 'ENOMEM') reason = 'memory_exhausted';
   if (error?.code === 'ENOSPC') reason = 'disk_full';
   const statusCode = error?.response?.status ?? error?.output?.statusCode;
@@ -66,7 +70,7 @@ function commandText(message) {
 }
 
 export function createMessageHandler({
-  downloadMediaMessage, log, privateLogger, accounts, tokenDiagnostics, tempRoot = os.tmpdir(),
+  downloadMediaMessage, log, privateLogger, accounts, deliveryGuard, tokenDiagnostics, tempRoot = os.tmpdir(),
   concurrency = Number(process.env.BOT_MEDIA_CONCURRENCY ?? 1),
   queueCapacity = Number(process.env.BOT_MEDIA_QUEUE_SIZE ?? 4),
   jobTimeoutMs = Number(process.env.BOT_MEDIA_JOB_TIMEOUT_MS ?? 900_000),
@@ -102,6 +106,7 @@ export function createMessageHandler({
   // Also bound jobs whose final edit is still paced after delivery.
   const progressCapacity = queueCapacity + workers + 4;
   let stopping = false;
+  let lastFailure;
   const commandReceipts = createCommandReceipts();
 
   const sendText = (sock, jid, text) => Promise.resolve().then(() =>
@@ -171,6 +176,7 @@ export function createMessageHandler({
     const jobTimer = setTimeout(() => controller.abort('job_deadline'), jobTimeoutMs);
     const rejectSize = () => new VideoError('validation', 'input_limit', 'Input exceeds the size limit.', { limitBytes: maxBytes });
     try {
+      if (deliveryGuard?.blocked) throw new VideoError('upload', 'reachout_restricted', 'Delivery is suspended.');
       observation?.update({ stage: 'downloading' });
       const declaredBytes = Number(media.fileLength);
       if (declaredBytes > maxBytes) {
@@ -230,11 +236,20 @@ export function createMessageHandler({
         const result = await timeStage('image', timing, () => processImage(input, dir, imageFormat, signal));
         ({ path: output, mimetype, metrics } = result);
       } else {
+        let preserveHdr = false;
+        if (accounts?.getHdr) {
+          try { preserveHdr = await accounts.getHdr(await accountAddress(sock, msg.key, jid)); }
+          catch { throw new VideoError('validation', 'hdr_preference_unavailable', 'Could not read HDR preference.'); }
+        }
         metrics = await repackVideo(input, output, {
+          preserveHdr,
           statusVideo: true, signal, onStage: timing, inputBytes: bytes, readMemory, maxOutputBytes,
           onSizePlan: fields => log.info?.(fields, 'HEVC output size budget'),
           onVideoStage: update => {
             if (update.stage === 'attempt') {
+              if (update.hdrSource && update.attempt === 1) {
+                void sendText(sock, jid, 'Mod HDR Preserve dimatikan. Mod HD biasa mungkin menukar HDR kepada SDR.');
+              }
               progress?.startAttempt(update);
               if (observation) {
                 const { videoMode, durationSeconds, attempt, width, height, fps } = update;
@@ -308,6 +323,7 @@ export function createMessageHandler({
         ...(Number.isSafeInteger(failure.outputBytes) && { outputBytes: failure.outputBytes }) });
       observation?.finish('failed', failure.reason === 'operation_failed' ? stage : failure.reason);
       controller.abort();
+      lastFailure = { stage: failure.stage, reason: failure.reason, at: Date.now() };
       log.error({ ...failure, downloadedBytes: bytes, elapsedMs: Date.now() - started }, 'Media processing failed');
       log.info?.({ stage: 'total', elapsedMs: Date.now() - started, outcome: 'failed' }, 'Media job timing');
       if (!stopping) {
@@ -330,10 +346,10 @@ export function createMessageHandler({
   }
 
   async function handleMessages(sock, { messages, type }) {
-    if (stopping || type !== 'notify' || !Array.isArray(messages)) return;
+    if (stopping || deliveryGuard?.blocked || type !== 'notify' || !Array.isArray(messages)) return;
     const jobs = [];
     for (const msg of messages) {
-      if (stopping) break;
+      if (stopping || deliveryGuard?.blocked) break;
       if (!msg) continue;
       const messageKey = msg.key ?? {};
       const jid = jidNormalizedUser(messageKey.remoteJid || '');
@@ -343,7 +359,9 @@ export function createMessageHandler({
       const address = jid.endsWith('@lid') ? 'lid' : jid.endsWith('@s.whatsapp.net') ? 'pn' : 'other';
       const diagnostic = (stage, fields) => log.info?.({ trace, stage, address, ...fields }, 'WhatsApp command');
       if (trace) diagnostic('received');
-      const key = messageKey.id && `${jid}:${messageKey.id}`;
+      const alias = jidNormalizedUser(messageKey.remoteJidAlt || '');
+      const dedupJid = address === 'pn' && /^\d+@lid$/.test(alias) ? alias : jid;
+      const key = messageKey.id && `${dedupJid}:${messageKey.id}`;
       const skipped = messageKey.fromMe ? 'own_message' : address === 'other' ? 'unsupported_chat' :
         !msg.message ? 'missing_body' : key && (seen.has(key) || accepted.has(key)) ? 'duplicate' : null;
       if (skipped) {
@@ -364,7 +382,7 @@ export function createMessageHandler({
         let reply;
         try {
           const [action] = text.trim().toLowerCase().split(/\s/, 1);
-          const accountJid = [branding.prefix + 'status', branding.prefix + 'daftar'].includes(action)
+          const accountJid = [branding.prefix + 'status', branding.prefix + 'daftar', branding.prefix + 'hdr'].includes(action)
             ? await accountAddress(sock, messageKey, jid) : jid;
           reply = await commandReply(text, accountJid, accounts);
         } catch {
@@ -377,10 +395,7 @@ export function createMessageHandler({
           continue;
         }
         diagnostic('reply_prepared');
-        const receipt = commandReceipts.track(sock, (stage, statusCode) => {
-          diagnostic(stage, { statusCode });
-          if (stage === 'server_rejected') void tokenDiagnostics?.rejected(sock, trace, statusCode);
-        });
+        const receipt = commandReceipts.track(sock, (stage, statusCode) => diagnostic(stage, { statusCode }));
         diagnostic('sending', { route: address, trackingReceipt: Boolean(receipt) });
         try {
           const send = () => sock.sendMessage(jid, { text: reply }, receipt ? { messageId: receipt.messageId } : undefined);
@@ -431,7 +446,7 @@ export function createMessageHandler({
     await Promise.all(jobs);
   }
 
-  handleMessages.snapshot = () => ({ activeJobs: active.size, queuedJobs: queue.length });
+  handleMessages.snapshot = () => ({ activeJobs: active.size, queuedJobs: queue.length, workers, queueCapacity, lastFailure });
   handleMessages.stop = async () => {
     stopping = true;
     commandReceipts.stop();

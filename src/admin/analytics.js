@@ -62,6 +62,7 @@ const errorCategories = new Set([
   'image_pixel_limit', 'video_memory_budget', 'memory_exhausted', 'disk_full', 'timeout', 'shutdown',
   'cancelled', 'output_limit', 'output_invalid', 'size_quality_limit', 'decoder_unavailable', 'encode_failed',
   'tool_terminated', 'tool_crash', 'tool_start_failed', 'upload_size_rejected',
+  'hdr_unsupported', 'hdr_metadata_changed', 'hdr_preference_unavailable', 'reachout_restricted',
   'download', 'validation', 'upload', 'processing', 'other'
 ]);
 const stages = new Set(['queued', 'downloading', 'processing', 'copy', 'validating', 'sending', 'image']);

@@ -211,12 +211,18 @@ function users(data) {
 function system(data) {
   const s = data.system;
   return [metrics([
-    ['HTTP server', 'Healthy'], ['WhatsApp', s.whatsapp === 'connected' ? 'Connected' : 'Disconnected'],
+    ['HTTP server', 'Healthy'],
+    ['Connection detail', s.whatsappReason?.replaceAll('_', ' ') ?? unavailable],
+    ['Outbound delivery', label({ available: 'Available', unknown: 'Unconfirmed', checking: 'Checking',
+      restricted: 'Restricted', rejected: 'Suspended after rejection', cooldown: 'Waiting for recheck' }, s.outbound)], ['WhatsApp', s.whatsapp === 'connected' ? 'Connected' : 'Disconnected'],
     ['Analytics Redis', label({ available: 'Available', unavailable: 'Unavailable' }, s.redis)],
     ['FFmpeg stage', data.active.some(j => ['copy', 'processing'].includes(j.stage)) ? 'Running' : 'Idle'],
     ['Node.js RSS', bytes(s.rssBytes)], ['Container memory', bytes(s.containerBytes)],
-    ['Container limit', bytes(s.containerLimitBytes)], ['Node.js CPU share', s.cpuPercent == null ? unavailable : `${s.cpuPercent}%`],
-    ['Process uptime', duration(s.uptimeSeconds * 1000)], ['Queue depth', count(data.queue.queuedJobs)],
+    ['Container limit', bytes(s.containerLimitBytes)], ['Memory headroom', bytes(s.memoryHeadroomBytes)],
+    ['Container OOM kills', count(s.oomKills)], ['Node.js CPU share', s.cpuPercent == null ? unavailable : `${s.cpuPercent}%`],
+    ['Process uptime', duration(s.uptimeSeconds * 1000)], ['Queue depth', count(data.queue.queuedJobs)], ['Workers', count(data.queue.workers)],
+    ['Queue capacity', count(data.queue.queueCapacity)], ['Last media failure', data.queue.lastFailure ?
+      data.queue.lastFailure.reason.replaceAll('_', ' ') : unavailable],
     ['Telemetry write drops · process', count(data.dropped)], ['Application build', s.version?.slice(0, 12) ?? unavailable],
     ['Last WhatsApp connection', time(s.lastWhatsAppAt)], ['Last video delivery', time(s.lastDeliveryAt)]
   ]), node('p', 'Container memory includes child processes where measured. CPU share reflects the Node.js process only.', 'muted')];
