@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { decodeMessageNode, proto } from '@whiskeysockets/baileys';
 import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm, writeFile, copyFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
@@ -459,6 +461,50 @@ test('command send failures are diagnosed without logging the message or recipie
   } }, { type: 'notify', messages: [{
     key: { remoteJid: 'fixture@s.whatsapp.net', id: 'ping-test' }, message: { conversation: '.ping' }
   }] });
-  assert.deepEqual(warnings, [{ stage: 'command_reply', reason: 'timeout', statusCode: 408 }]);
+  assert.match(warnings[0].trace, /^[a-f0-9]{16}$/);
+  assert.deepEqual(warnings.map(({ trace, ...fields }) => fields), [{ stage: 'command_reply', reason: 'timeout', statusCode: 408 }]);
   await handler.stop();
+});
+
+test('Baileys-decoded wrapped LID command uses a verified sender route and distinguishes send from ACK', async () => {
+  const entries = [];
+  const replies = [];
+  const handler = createMessageHandler({ log: { info: fields => entries.push(fields), error() {} } });
+  const sock = {
+    ev: new EventEmitter(), ws: new EventEmitter(), authState: { creds: { me: { id: '999@s.whatsapp.net' } } },
+    async sendMessage(jid, payload, { messageId }) {
+      replies.push({ jid, payload });
+      this.ws.emit('CB:ack,class:message', { attrs: { id: messageId } });
+      this.ev.emit('messages.update', [{ key: { fromMe: true, id: messageId },
+        update: { status: proto.WebMessageInfo.Status.DELIVERY_ACK } }]);
+    }
+  };
+  const wrapped = proto.Message.decode(proto.Message.encode({
+    ephemeralMessage: { message: { ephemeralMessage: { message: { extendedTextMessage: { text: '.ping' } } } } }
+  }).finish());
+  const deliver = async (id, attrs = {}, overrides = {}) => {
+    const { fullMessage } = decodeMessageNode({
+      tag: 'message', attrs: { from: '111@lid', t: '12', id, ...attrs }
+    }, '999@s.whatsapp.net', '222@lid');
+    await handler(sock, { type: 'notify', messages: [{ ...fullMessage, message: wrapped,
+      key: { ...fullMessage.key, ...overrides } }] });
+  };
+  await deliver('pn-fallback', { sender_pn: '333@s.whatsapp.net' });
+  assert.deepEqual(replies, [{ jid: '333@s.whatsapp.net', payload: { text: '🏓 Pong!' } }]);
+  assert.deepEqual(entries.map(entry => entry.stage), ['received', 'handler_invoked', 'reply_prepared', 'sending',
+    'server_acknowledged', 'delivery_receipt', 'send_resolved']);
+  assert.equal(new Set(entries.map(entry => entry.trace)).size, 1);
+  assert.doesNotMatch(JSON.stringify(entries), /@|ping|Pong/);
+  await deliver('no-fallback');
+  await deliver('mismatch', { sender_pn: '333@s.whatsapp.net', sender_lid: '555@lid' });
+  await deliver('own', { sender_pn: '333@s.whatsapp.net' }, { fromMe: true });
+  assert.equal(replies.length, 1);
+  assert.equal(entries.filter(entry => entry.stage === 'reply_blocked').length, 2);
+  assert.equal(entries.at(-1).reason, 'own_message');
+  sock.authState.creds.me.lid = '222@lid';
+  await deliver('normal-lid');
+  assert.equal(replies.at(-1).jid, '111@lid');
+  await handler.stop();
+  assert.equal(sock.ws.listenerCount('CB:ack,class:message'), 0);
+  assert.equal(sock.ev.listenerCount('messages.update'), 0);
 });
