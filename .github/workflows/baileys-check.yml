@@ -24,6 +24,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg imagemagick libheif-plugin-libde265 redis-server
       - name: Run tests
         run: npm test
+      - name: Verify v6 to v7 encrypted Redis migration
+        run: |
+          legacy_sha=4327bf0033e05101652c65620e9e8787c0c272ac
+          git fetch --depth=1 origin "$legacy_sha"
+          legacy_dir=$(mktemp -d)
+          git archive "$legacy_sha" package.json package-lock.json src | tar -xf - -C "$legacy_dir"
+          npm ci --prefix "$legacy_dir" --no-audit --no-fund
+          BAILEYS_V6_AUTH_MODULE="$legacy_dir/src/baileys-remote-auth.js" node --test --test-name-pattern='v7 native LID' test/baileys-remote-auth.test.js
       - name: Build Docker image
         run: docker build -t whatsapp-hd-baileys:test .
       - name: Reproduce the startup 404 at the affected deployment revision

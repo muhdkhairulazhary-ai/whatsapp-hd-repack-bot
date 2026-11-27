@@ -1,9 +1,9 @@
 import { getPairingReference } from './baileys-pairing.js';
 
-// Live bot commands and media do not require the optional metadata queries
-// or a history import. Protocol login, crypto and live-message queries remain enabled.
+// v7 reads WhatsApp's privacy-token feature flags in its init props query.
+// Keep history import independent of live-message readiness.
 export const liveSocketOptions = Object.freeze({
-  fireInitQueries: false,
+  fireInitQueries: true,
   shouldSyncHistoryMessage: () => false
 });
 
@@ -168,7 +168,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
 
       function checkStartupBuffer() {
         if (!isCurrent() || !connected || !sock.ev.isBuffering?.()) return;
-        // 6.7.24 starts buffering restored sessions before WA sends the offline
+        // Baileys starts buffering restored sessions before WA sends the offline
         // marker. It also normally allows 20 seconds for initial history sync.
         // Without the marker or successful history completion, notify batches
         // can stay buffered even though the authenticated socket is open.

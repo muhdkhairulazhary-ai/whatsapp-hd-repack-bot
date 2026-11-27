@@ -14,10 +14,11 @@
     "start:baileys": "node src/baileys-server.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "6.7.24",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "multer": "^1.4.5-lts.2",
-    "pino": "^9.6.0"
+    "pino": "^9.6.0",
+    "undici": "6.29.1"
   }
 }

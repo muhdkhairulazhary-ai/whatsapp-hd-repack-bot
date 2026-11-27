@@ -344,8 +344,8 @@ test('an unrelated phone notification cannot advance a confirmed pairing', async
   await manager.stop();
 });
 
-test('live socket policy skips optional startup work and delivers buffered commands after authenticated open', async () => {
-  assert.equal(liveSocketOptions.fireInitQueries, false);
+test('live socket policy enables server props, skips history import and delivers buffered commands after authenticated open', async () => {
+  assert.equal(liveSocketOptions.fireInitQueries, true);
   assert.equal(liveSocketOptions.shouldSyncHistoryMessage({ syncType: 3 }), false);
   const output = [];
   const handler = createMessageHandler({ log: { error() {} } });
