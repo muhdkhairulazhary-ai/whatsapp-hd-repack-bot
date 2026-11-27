@@ -7,6 +7,7 @@ import { mkdir } from 'node:fs/promises';
 import http from 'node:http';
 import { createAccountStore } from './shelby-accounts.js';
 import { branding } from './shelby-commands.js';
+import { createTokenDiagnostics } from './baileys-token-diagnostics.js';
 import { createMessageHandler } from './baileys-media.js';
 import { createConnectionManager, liveSocketOptions } from './baileys-connection.js';
 import { createBaileysDiagnosticLogger, pairingBrowser, requestConfirmedPairingCode } from './baileys-pairing.js';
@@ -21,6 +22,7 @@ const phone = (process.env.BAILEYS_PHONE_NUMBER || '').replace(/\D/g, '');
 const port = Number(process.env.PORT || 3000);
 const pairingToken = process.env.PAIRING_ACCESS_TOKEN || '';
 // The library logs protocol payloads and identifiers at several log levels.
+const tokenDiagnostics = process.env.SHELBY_WA_TOKEN_DIAGNOSTICS === '1' ? createTokenDiagnostics(log) : undefined;
 const privateLogger = pino({ level: 'silent' });
 process.umask(0o077);
 
@@ -35,7 +37,7 @@ const admin = startAdmin({
 });
 
 const accounts = createAccountStore(process.env.BOT_ACCOUNTS_DIR || './shelby-accounts');
-const onMessages = createMessageHandler({ downloadMediaMessage, log, privateLogger, accounts, telemetry: admin?.telemetry });
+const onMessages = createMessageHandler({ downloadMediaMessage, log, privateLogger, accounts, tokenDiagnostics, telemetry: admin?.telemetry });
 
 const loadRemoteAuth = createRemoteAuthLoader({ authDir, log });
 
@@ -54,7 +56,7 @@ const connection = createConnectionManager({
     browser: pairingBrowser,
     logger: createBaileysDiagnosticLogger(privateLogger, onNotificationError, (reason, statusCode) => {
       log.warn({ reason, statusCode }, 'WhatsApp startup or message processing failed');
-    }),
+    }, tokenDiagnostics),
     connectTimeoutMs: 30000,
     keepAliveIntervalMs: 30000,
   }),

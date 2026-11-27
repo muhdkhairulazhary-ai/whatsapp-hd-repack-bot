@@ -11,7 +11,8 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node --test",
-    "start:baileys": "node src/baileys-server.js"
+    "start:baileys": "node src/baileys-server.js",
+    "postinstall": "node scripts/install-baileys-observability.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "7.0.0-rc14",

@@ -77,10 +77,15 @@ const RECEIVE_ERRORS = new Map([
   ["unexpected error in 'init queries'", 'whatsapp_init_queries_failed']
 ]);
 
-export function createBaileysDiagnosticLogger(silentLogger, onNotificationError, onTransportError) {
+export function createBaileysDiagnosticLogger(silentLogger, onNotificationError, onTransportError, tokenDiagnostics) {
   // The full Baileys payload, text, stack, and identifiers stay outside app logs.
   const logger = Object.create(silentLogger);
   logger.child = () => logger;
+  if (tokenDiagnostics) {
+    logger.shelbyTokenDiagnostics = true;
+    logger.debug = tokenDiagnostics.native;
+    logger.info = tokenDiagnostics.native;
+  }
   logger.error = (fields, message) => {
     if (message === "unexpected error in 'handling notification'") {
       onNotificationError(protocolErrorCode(fields?.err?.data) ?? protocolErrorCode(fields?.err?.output?.statusCode));
