@@ -5,6 +5,8 @@ import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMes
 import pino from 'pino';
 import { mkdir } from 'node:fs/promises';
 import http from 'node:http';
+import { createDeliveryGuard } from './baileys-delivery-guard.js';
+import { createHdrPreferences } from './shelby-hdr-preferences.js';
 import { createAccountStore } from './shelby-accounts.js';
 import { branding } from './shelby-commands.js';
 import { createTokenDiagnostics } from './baileys-token-diagnostics.js';
@@ -25,19 +27,22 @@ const pairingToken = process.env.PAIRING_ACCESS_TOKEN || '';
 const tokenDiagnostics = process.env.SHELBY_WA_TOKEN_DIAGNOSTICS === '1' ? createTokenDiagnostics(log) : undefined;
 const privateLogger = pino({ level: 'silent' });
 process.umask(0o077);
+const deliveryGuard = createDeliveryGuard({ log });
 
 const admin = startAdmin({
   log,
   connection: {
     get connected() { return connection.connected; },
+    get reason() { return connection.reason; },
+    get outbound() { return deliveryGuard.state; },
     get lastConnectedAt() { return connection.lastConnectedAt; }
   },
   media: { snapshot: () => onMessages.snapshot() },
   version: process.env.RENDER_GIT_COMMIT
 });
 
-const accounts = createAccountStore(process.env.BOT_ACCOUNTS_DIR || './shelby-accounts');
-const onMessages = createMessageHandler({ downloadMediaMessage, log, privateLogger, accounts, tokenDiagnostics, telemetry: admin?.telemetry });
+const accounts = createAccountStore(process.env.BOT_ACCOUNTS_DIR || './shelby-accounts', createHdrPreferences());
+const onMessages = createMessageHandler({ downloadMediaMessage, log, privateLogger, accounts, deliveryGuard, tokenDiagnostics, telemetry: admin?.telemetry });
 
 const loadRemoteAuth = createRemoteAuthLoader({ authDir, log });
 
@@ -50,7 +55,7 @@ const connection = createConnectionManager({
     return useMultiFileAuthState(authDir);
   }),
   requestPairingCode: requestConfirmedPairingCode,
-  makeSocket: (auth, onNotificationError) => makeWASocket({
+  makeSocket: (auth, onNotificationError) => deliveryGuard.attach(makeWASocket({
     ...liveSocketOptions,
     auth,
     browser: pairingBrowser,
@@ -59,7 +64,7 @@ const connection = createConnectionManager({
     }, tokenDiagnostics),
     connectTimeoutMs: 30000,
     keepAliveIntervalMs: 30000,
-  }),
+  })),
   onMessages
 });
 

@@ -155,9 +155,13 @@ export function createAdmin({ config = adminConfig(), connection, media, now = D
     const memory = memorySnapshot();
     return {
       http: 'healthy', whatsapp: connection?.connected ? 'connected' : 'disconnected',
+      whatsappReason: connection?.reason ?? null, outbound: connection?.outbound ?? 'unknown',
       redis: analytics.health().redis, uptimeSeconds: Math.floor(process.uptime()), cpuPercent,
       rssBytes: memory.rssBytes, containerBytes: memory.cgroupBytes ?? null,
       containerLimitBytes: Number.isSafeInteger(memory.cgroupLimitBytes) ? memory.cgroupLimitBytes : null,
+      oomKills: memory.oomKills ?? null,
+      memoryHeadroomBytes: Number.isSafeInteger(memory.cgroupLimitBytes) && Number.isSafeInteger(memory.cgroupBytes)
+        ? Math.max(0, memory.cgroupLimitBytes - memory.cgroupBytes) : null,
       version: build, lastWhatsAppAt: connection?.lastConnectedAt ?? null,
       lastDeliveryAt: snapshot?.overview.lastDeliveryAt ?? null
     };

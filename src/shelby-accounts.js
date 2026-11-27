@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-export function createAccountStore(directory) {
+export function createAccountStore(directory, hdrPreferences) {
   const operations = new Map();
   const keyFor = jid => createHash('sha256').update(jid).digest('hex');
 
@@ -42,6 +42,19 @@ export function createAccountStore(directory) {
       const key = keyFor(jid);
       await operations.get(key);
       return read(key);
+    },
+    async getHdr(jid) {
+      if (hdrPreferences) return hdrPreferences.get(jid);
+      const key = keyFor(jid);
+      await operations.get(key);
+      return (await read(key)).hdr === true;
+    },
+    async setHdr(jid, enabled) {
+      if (hdrPreferences) return hdrPreferences.set(jid, enabled);
+      return update(jid, account => {
+        account.hdr = enabled;
+        return { changed: true };
+      });
     },
     register(jid, name) {
       return update(jid, account => {

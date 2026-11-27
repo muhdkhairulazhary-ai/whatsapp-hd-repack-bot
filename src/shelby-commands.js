@@ -24,11 +24,20 @@ export async function commandReply(text, jid, accounts, brand = branding) {
   const registerHint = `Daftar dengan ${prefix}daftar Nama.`;
   const commands = [
     `${prefix}daftar Nama — Daftar akaun`, `${prefix}status — Semak akaun`,
-    `${prefix}menu — Menu utama`, `${prefix}help — Bantuan`
+    `${prefix}menu — Menu utama`, `${prefix}help — Bantuan`, `${prefix}hdr on/off — Tetapan HDR (Beta)`
   ].join('\n');
   const value = text.trim();
   const [command, argument = ''] = /^(\S+)(?:\s+([\s\S]*))?$/.exec(value)?.slice(1) || [];
   const action = command?.startsWith(prefix) ? command.slice(prefix.length).toLowerCase() : command?.toLowerCase();
+  if (action === 'hdr' && command.startsWith(prefix)) {
+    const option = argument.trim().toLowerCase();
+    if (option && !['on', 'off'].includes(option)) return `Gunakan ${prefix}hdr on atau ${prefix}hdr off.`;
+    if (option) await accounts.setHdr(jid, option === 'on');
+    const enabled = option ? option === 'on' : await accounts.getHdr(jid);
+    return enabled
+      ? 'HDR Preserve (Beta) aktif. Hanya HDR yang boleh disalin tanpa penukaran diterima. WhatsApp Status mungkin menukar HDR kepada SDR.'
+      : 'HDR Preserve dimatikan. Mod HD biasa digunakan dan video HDR mungkin kehilangan HDR.';
+  }
   if (action === 'ping') return '🏓 Pong!';
   if (action === 'menu') return [
     title('MAIN MENU'), tagline,

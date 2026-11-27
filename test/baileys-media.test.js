@@ -545,3 +545,26 @@ test('v7 download deadline closes a real pending media request before headers ar
   assert.equal(errors[0].reason, 'timeout');
   await handler.stop();
 });
+
+test('a repeated media stanza using Baileys PN and LID aliases starts one job', async () => {
+  let downloads = 0;
+  const lid = '123456@lid';
+  const pn = '15550000111@s.whatsapp.net';
+  const handler = createMessageHandler({
+    log: { info() {}, error() {} },
+    async downloadMediaMessage() {
+      downloads++;
+      return Readable.from([Buffer.from('invalid fixture video')]);
+    }
+  });
+  const sock = { async sendMessage() {} };
+  const delivery = (remoteJid, remoteJidAlt) => ({
+    type: 'notify',
+    messages: [{ key: { id: 'duplicate-stanza', remoteJid, remoteJidAlt }, message: { videoMessage: {} } }]
+  });
+  await Promise.all([handler(sock, delivery(pn, lid)), handler(sock, delivery(lid, pn))]);
+  assert.equal(downloads, 1);
+  assert.equal(handler.snapshot().activeJobs, 0);
+  assert.equal(handler.snapshot().queuedJobs, 0);
+  await handler.stop();
+});

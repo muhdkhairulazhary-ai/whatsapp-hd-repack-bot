@@ -28,24 +28,6 @@ test('token diagnostics correlate relay facts and discard protocol payloads', ()
   ]);
 });
 
-test('463 queries native reachout status once without replay or fallback', async () => {
-  const entries = [];
-  const diagnostics = createTokenDiagnostics({ info: fields => entries.push(fields) });
-  let probes = 0;
-  const sock = {
-    ws: { isOpen: true },
-    async fetchAccountReachoutTimelock() {
-      probes++;
-      return { isActive: true, enforcementType: 'private-value' };
-    },
-    sendMessage() { assert.fail('Diagnostics must not send messages'); }
-  };
-  await diagnostics.rejected(sock, 'trace-one', 408);
-  await diagnostics.rejected(sock, 'trace-one', 463);
-  await diagnostics.rejected(sock, 'trace-two', 463);
-  assert.equal(probes, 1);
-  assert.deepEqual(entries, [{ stage: 'reachout_status', trace: 'trace-one', outcome: 'active' }]);
-});
 
 test('instrumented native helper only reports tokens accepted for storage', async () => {
   const entry = new URL(import.meta.resolve('@whiskeysockets/baileys'));

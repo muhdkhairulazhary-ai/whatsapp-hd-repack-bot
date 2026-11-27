@@ -12,6 +12,7 @@ const CONNECT_DEADLINE_MS = 60_000;
 const PHONE_NOTIFICATION_EVENT = 'CB:notification,type:link_code_companion_reg';
 const SIGNED_PAIR_EVENT = 'CB:iq,,pair-success';
 const MAX_RETRIES = 3;
+const MAX_LINKED_NETWORK_RETRIES = 6;
 const MAX_STORAGE_RETRIES = 6;
 const STARTUP_BUFFER_MS = 30_000;
 const MAX_STARTUP_MESSAGES = 32;
@@ -25,7 +26,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
   const terminal = new Set([
     reasons.loggedOut, reasons.forbidden, reasons.connectionReplaced,
     reasons.badSession, reasons.multideviceMismatch
-  ]);
+  ].filter(Number.isInteger));
   let active;
   let retryTimer;
   let starting;
@@ -35,6 +36,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
   let connected = false;
   let lastConnectedAt = null;
   let recoveryStartedAt = now();
+  let confirmedTerminal = false;
   let status = { status: 'connecting' };
 
   function report(next, reason, statusCode) {
@@ -42,10 +44,10 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
     log.info(status, 'WhatsApp connection state');
   }
 
-  function scheduleRetry(pairing, reason, statusCode, storage = false) {
+  function scheduleRetry(pairing, reason, statusCode, storage = false, linked = false) {
     const retries = storage ? storageRetries : socketRetries;
     if (stopped) return;
-    if (retries >= (storage ? MAX_STORAGE_RETRIES : MAX_RETRIES)) {
+    if (retries >= (storage ? MAX_STORAGE_RETRIES : linked ? MAX_LINKED_NETWORK_RETRIES : MAX_RETRIES)) {
       log.warn?.({ reason, attempts: retries }, 'WhatsApp retry budget exhausted');
       return;
     }
@@ -220,7 +222,9 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         connected = false;
         if (openedAt !== undefined) recoveryStartedAt = now();
         const hadCode = status.status === 'pairing_code_ready';
-        const expired = reason === 'pairing_phone_notification_missing' || (hadCode && alreadyClosed);
+        if (terminal.has(statusCode)) confirmedTerminal = true;
+        const expired = !confirmedTerminal &&
+          (reason === 'pairing_phone_notification_missing' || (hadCode && alreadyClosed));
         const waitForManualRetry = expired || reason === 'pairing_hello_rejected' ||
           reason === 'pairing_phone_reference_mismatch' || phoneConfirmationReceived || signedPairReceived;
         cancel(deadline);
@@ -238,14 +242,10 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         await saves;
         await auth.release?.();
         active = undefined;
-        if (stopped) return;
+        if (stopped || confirmedTerminal) return;
         if (saveFailed) {
           report('connection_failed', 'credential_storage_failed');
           if (auth.release) scheduleRetry(pairing, 'credential_storage_failed', statusCode, true);
-          return;
-        }
-        if (terminal.has(statusCode)) {
-          report('connection_failed', reason, statusCode);
           return;
         }
         if (openedAt !== undefined && now() - openedAt >= 60_000) {
@@ -257,7 +257,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
           return;
         }
         if (!state.creds.account && waitForManualRetry) return;
-        scheduleRetry(pairing, reason, statusCode);
+        scheduleRetry(pairing, reason, statusCode, false, Boolean(state.creds.account));
       }
 
       async function onUpdate({ connection, qr, isNewLogin, lastDisconnect, receivedPendingNotifications }) {
@@ -336,12 +336,13 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
   return {
     start,
     get connected() { return connected; },
+    get reason() { return status.reason ?? null; },
     get lastConnectedAt() { return lastConnectedAt; },
     requestPairing(refresh = false) {
       if (status.status === 'pairing_code_ready' && now() >= Date.parse(status.expiresAt)) {
         void active.close('pairing_phone_notification_missing');
       }
-      if (!active && !starting && !retryTimer && !stopped && phone &&
+      if (!active && !starting && !retryTimer && !stopped && !confirmedTerminal && phone &&
           (status.reason === 'pairing_required' ||
            (refresh && ['connection_failed', 'pairing_code_expired'].includes(status.status)))) {
         socketRetries = 0;

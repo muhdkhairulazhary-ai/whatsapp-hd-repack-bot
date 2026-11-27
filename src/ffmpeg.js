@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
@@ -95,7 +96,7 @@ function abortSource(signal) {
   return signal.reason === 'shutdown' || signal.reason === 'job_deadline' ? signal.reason : 'cancelled';
 }
 
-export function runTool(command, args, { stage, timeoutMs, captureOutput = false, signal, env = process.env, onProgress, progressIntervalMs = 15_000 }) {
+export function runTool(command, args, { stage, timeoutMs, captureOutput = false, hashOutput = false, signal, env = process.env, onProgress, progressIntervalMs = 15_000 }) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       const stopSource = abortSource(signal);
@@ -105,10 +106,11 @@ export function runTool(command, args, { stage, timeoutMs, captureOutput = false
     }
     const oomBefore = stage === 'ffmpeg' ? memorySnapshot().oomKills : undefined;
     const child = spawn(command, args, {
-      env, stdio: ['ignore', captureOutput ? 'pipe' : 'ignore', 'pipe', onProgress ? 'pipe' : 'ignore']
+      env, stdio: ['ignore', captureOutput || hashOutput ? 'pipe' : 'ignore', 'pipe', onProgress ? 'pipe' : 'ignore']
     });
     const progress = onProgress && ffmpegProgress(child.stdio[3], onProgress, progressIntervalMs);
     let stdout = '';
+    const digest = hashOutput && createHash('sha256');
     const stderr = createStderrDiagnostics();
     let stopSource;
     let spawnError;
@@ -121,7 +123,10 @@ export function runTool(command, args, { stage, timeoutMs, captureOutput = false
     const timer = setTimeout(() => stop(stage === 'ffmpeg' ? 'ffmpeg_deadline' : 'tool_deadline'), timeoutMs);
     signal?.addEventListener('abort', abort, { once: true });
 
-    child.stdout?.on('data', chunk => { stdout = (stdout + chunk).slice(0, 32768); });
+    child.stdout?.on('data', chunk => {
+      if (digest) digest.update(chunk);
+      else stdout = (stdout + chunk).slice(0, 32768);
+    });
     child.stderr.on('data', chunk => stderr.observe(chunk));
     child.once('error', error => { spawnError = error; });
     child.once('close', (exitCode, exitSignal) => {
@@ -149,19 +154,20 @@ export function runTool(command, args, { stage, timeoutMs, captureOutput = false
           : stderr.has('decoder_unavailable') ? 'decoder_unavailable' : 'encode_failed';
         reject(new VideoError(stage, reason, `${command} failed with exit code ${exitCode}.`, details));
       } else {
-        resolve(stdout);
+        resolve(digest ? digest.digest('hex') : stdout);
       }
     });
   });
 }
 
-async function probeVideo(inputPath, statusVideo, signal, stage = 'validation') {
+async function probeVideo(inputPath, statusVideo, signal, stage = 'validation', hdr = false) {
   const entries = statusVideo
     ? 'format=duration,bit_rate:format_tags=major_brand:stream=index,codec_type,codec_name,codec_tag_string,profile,pix_fmt,color_transfer,width,height,avg_frame_rate,r_frame_rate,bit_rate,channels,start_time,duration,field_order,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data=rotation,displaymatrix,side_data_type'
     : 'format=duration';
   const output = await runTool('ffprobe', [
     '-v', 'error', ...(statusVideo ? ['-threads', '1', '-protocol_whitelist', 'file', '-f', 'mov'] : []),
-    '-show_entries', entries, '-of', 'json', inputPath
+    '-show_entries', hdr ? entries + ':stream=color_space,color_primaries,color_range,chroma_location,extradata_hash:stream_side_data' : entries,
+    ...(hdr ? ['-show_data_hash', 'sha256'] : []), '-of', 'json', inputPath
   ], { stage, timeoutMs: 15_000, captureOutput: true, signal });
   let metadata;
   try {
@@ -233,10 +239,72 @@ function verifyStatusVideo(input, output, preserveMatrix) {
   }
 }
 
+const hdrTransfers = new Set(['arib-std-b67', 'smpte2084']);
+const dolbyVision = video => /^(dvhe|dvh1)$/.test(video.codec_tag_string) ||
+  video.side_data_list?.some(side => /dovi|dolby vision/i.test(side.side_data_type || ''));
+
+function isHdrCandidate(video) {
+  return dolbyVision(video) || hdrTransfers.has(video.color_transfer) ||
+    (video.profile === 'Main 10' && (!video.color_transfer || video.color_transfer === 'unknown'));
+}
+
+function hdrPacketFingerprint(file, track, signal) {
+  // Packet hashes cover embedded HEVC metadata (including mastering-display,
+  // content-light and HLG SEI). Timing is compared without decoding any frames.
+  return runTool('ffprobe', [
+    '-v', 'error', '-threads', '1', '-protocol_whitelist', 'file', '-f', 'mov',
+    '-select_streams', String(track.index), '-show_packets', '-show_data_hash', 'sha256',
+    '-show_entries', 'packet=pts_time,dts_time,duration_time,data_hash', '-of', 'compact=p=0', file
+  ], { stage: 'verification', timeoutMs: 30_000, hashOutput: true, signal });
+}
+
+async function remuxHdr(inputPath, outputPath, input, { signal, convert, onVideoStage, onStage, inputBytes, maxOutputBytes }) {
+  const { video, audio } = input;
+  if (video.codec_name !== 'hevc' || video.profile !== 'Main 10' || video.pix_fmt !== 'yuv420p10le' ||
+      !hdrTransfers.has(video.color_transfer) || video.color_primaries !== 'bt2020' ||
+      !['bt2020nc', 'bt2020c'].includes(video.color_space) || !/^(hvc1|hev1)$/.test(video.codec_tag_string) ||
+      !standardRotation(video) || dolbyVision(video) || (audio && !compatibleAudio(audio))) {
+    throw new VideoError('validation', 'hdr_unsupported', 'HDR preservation requires a compatible Main 10 HLG/HDR10 source.');
+  }
+  onVideoStage?.({ stage: 'attempt', videoMode: 'copy', durationSeconds: input.duration, attempt: 1,
+    ...mediaMetrics(input, inputBytes) });
+  await convert([
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-threads', '1', '-protocol_whitelist', 'file',
+    '-copyts', '-f', 'mov', '-noautorotate', '-i', inputPath, '-map', `0:${video.index}`,
+    ...(audio ? ['-map', `0:${audio.index}`] : []), '-c', 'copy', '-tag:v', video.codec_tag_string,
+    '-avoid_negative_ts', 'disabled', '-map_metadata', '-1', '-map_chapters', '-1', '-movflags', '+faststart+write_colr', outputPath
+  ]);
+  onVideoStage?.({ stage: 'validating' });
+  return timeStage('verification', onStage, async () => {
+    const output = await stat(outputPath);
+    if (output.size > (maxOutputBytes ?? 150_000_000)) {
+      throw new VideoError('verification', 'output_limit', 'HDR output exceeds the upload size limit.',
+        { outputBytes: output.size, limitBytes: maxOutputBytes ?? 150_000_000 });
+    }
+    const actual = await probeVideo(outputPath, true, signal, 'verification', true);
+    const fields = ['codec_name', 'codec_tag_string', 'profile', 'pix_fmt', 'width', 'height', 'avg_frame_rate',
+      'r_frame_rate', 'color_primaries', 'color_transfer', 'color_space', 'color_range', 'chroma_location',
+      'sample_aspect_ratio', 'start_time', 'duration', 'extradata_hash', 'side_data_list'];
+    const mismatched = () => new VideoError('verification', 'hdr_metadata_changed', 'Could not verify lossless HDR output.');
+    if (!/^(isom|mp4)/.test(actual.brand) || !actual.video.extradata_hash ||
+        fields.some(key => JSON.stringify(video[key]) !== JSON.stringify(actual.video[key])) ||
+        Boolean(audio) !== Boolean(actual.audio) || (audio && !compatibleAudio(actual.audio))) throw mismatched();
+    for (const [before, after] of [[video, actual.video], ...(audio ? [[audio, actual.audio]] : [])]) {
+      const hash = await hdrPacketFingerprint(inputPath, before, signal);
+      if (hash !== await hdrPacketFingerprint(outputPath, after, signal)) throw mismatched();
+    }
+    return {
+      videoMode: 'copy', audioMode: audio ? 'copy' : 'none', hdrPreserved: true,
+      input: mediaMetrics(input, inputBytes ?? (await stat(inputPath)).size),
+      output: mediaMetrics(actual, output.size)
+    };
+  });
+}
+
 export async function repackVideo(inputPath, outputPath, {
-  statusVideo = false, signal, onProgress, onStage, inputBytes, readMemory = memorySnapshot, maxOutputBytes, onSizePlan, onVideoStage
+  statusVideo = false, preserveHdr = false, signal, onProgress, onStage, inputBytes, readMemory = memorySnapshot, maxOutputBytes, onSizePlan, onVideoStage
 } = {}) {
-  const input = await timeStage('ffprobe', onStage, () => probeVideo(inputPath, statusVideo, signal));
+  const input = await timeStage('ffprobe', onStage, () => probeVideo(inputPath, statusVideo, signal, 'validation', preserveHdr && statusVideo));
   const maxSeconds = statusVideo ? Math.min(config.maxVideoSeconds, 60) : config.maxVideoSeconds;
   if (input.duration > maxSeconds) {
     throw new VideoError('validation', 'duration_limit', `This video is longer than the ${maxSeconds}-second limit.`, {
@@ -256,6 +324,12 @@ export async function repackVideo(inputPath, outputPath, {
     } finally {
       encodingMs += performance.now() - started;
     }
+  }
+
+  if (statusVideo && preserveHdr && isHdrCandidate(input.video)) {
+    return remuxHdr(inputPath, outputPath, input, {
+      signal, convert, onVideoStage, onStage, inputBytes, maxOutputBytes
+    });
   }
 
   if (statusVideo) {
@@ -301,7 +375,7 @@ export async function repackVideo(inputPath, outputPath, {
       }
       const { args } = buildStatusArgs(inputPath, outputPath, input, fallback, sizePlan);
       onVideoStage?.({ stage: 'attempt', videoMode, durationSeconds: input.duration, attempt: ++attempt,
-        ...mediaMetrics(input, inputBytes) });
+        ...mediaMetrics(input, inputBytes), hdrSource: isHdrCandidate(input.video) });
       try {
         await convert(args);
       } catch (error) {
