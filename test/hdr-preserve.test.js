@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { repackVideo } from '../src/ffmpeg.js';
 import { createAccountStore } from '../src/shelby-accounts.js';
@@ -102,4 +103,100 @@ test('a registered SDR user can enable HDR without changing the H.264 Smart Copy
   assert.equal(result.hdrPreserved, undefined);
   assert.equal(result.output.videoCodec, 'h264');
   assert.equal(result.output.fps, '25/1');
+});
+
+const dolbyFixture = fileURLToPath(new URL('./fixtures/dolby-vision-84.mov', import.meta.url));
+
+test('copies Dolby Vision 8.4 MOV with original AAC, HLG, packet hashes, timing and configuration', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'shelby-dv84-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const output = join(dir, 'output.mp4');
+  const result = await repackVideo(dolbyFixture, output, {
+    statusVideo: true, preserveHdr: true,
+    readMemory() { assert.fail('Dolby Vision Smart Copy may not start an encoder'); }
+  });
+  assert.equal(result.hdrPreserved, true);
+  assert.equal(result.audioMode, 'copy');
+  assert.equal(result.videoMode, 'copy');
+  assert.equal(result.output.width, 1080);
+  assert.equal(result.output.height, 1920);
+  assert.equal(result.output.fps, '60/1');
+  assert.equal(result.output.videoBitrateBps, result.input.videoBitrateBps);
+
+  const probe = async file => JSON.parse((await exec('ffprobe', ['-v', 'error', '-show_packets',
+    '-show_data_hash', 'sha256', '-show_entries',
+    'packet=stream_index,pts_time,dts_time,duration_time,data_hash:stream=codec_name,codec_tag_string,profile,sample_rate,channels,color_primaries,color_transfer,color_space:stream_side_data',
+    '-of', 'json', file])).stdout);
+  const [before, after] = await Promise.all([probe(dolbyFixture), probe(output)]);
+  assert.deepEqual(after.streams, before.streams);
+  assert.deepEqual(after.packets, before.packets);
+  const [video, audio] = after.streams;
+  assert.equal(video.codec_tag_string, 'hvc1');
+  assert.equal(video.color_transfer, 'arib-std-b67');
+  assert.equal(video.color_primaries, 'bt2020');
+  assert.equal(video.color_space, 'bt2020nc');
+  assert.equal(audio.sample_rate, '44100');
+  assert.equal(audio.channels, 2);
+  assert.equal(audio.profile, 'LC');
+  const record = video.side_data_list.find(data => data.side_data_type === 'DOVI configuration record');
+  assert.equal(record.dv_profile, 8);
+  assert.equal(record.dv_bl_signal_compatibility_id, 4);
+  assert.equal(record.rpu_present_flag, 1);
+  assert.equal(record.el_present_flag, 0);
+  assert.equal(record.bl_present_flag, 1);
+
+  // Inspect encoded NALs without decoding the 1080p stream. Dolby Vision RPU
+  // NALs have HEVC type 62 and must remain unchanged after extracting Annex B.
+  const extract = async file => (await exec('ffmpeg', ['-v', 'error', '-i', file, '-map', '0:v:0',
+    '-c', 'copy', '-bsf:v', 'hevc_mp4toannexb,filter_units=pass_types=62', '-f', 'hevc', '-'],
+  { encoding: 'buffer' })).stdout;
+  const expectedRpu = await extract(dolbyFixture);
+  assert.ok(expectedRpu.length > 0);
+  assert.deepEqual(await extract(output), expectedRpu);
+});
+
+test('rejects a Dolby Vision record with the wrong compatibility ID before remuxing', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'shelby-dv84-negative-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bytes = await readFile(dolbyFixture);
+  const recordOffset = bytes.indexOf('dvvC');
+  assert.ok(recordOffset > 0);
+  assert.equal(bytes[recordOffset + 8], 0x40);
+  bytes[recordOffset + 8] = 0x10;
+  const input = join(dir, 'unsupported.mov');
+  await writeFile(input, bytes);
+  await assert.rejects(repackVideo(input, join(dir, 'output.mp4'), {
+    statusVideo: true, preserveHdr: true,
+    onVideoStage() { assert.fail('Unsupported Dolby Vision must never start a remux or fallback'); }
+  }), { reason: 'hdr_unsupported' });
+});
+
+test('fails verification when the remux keeps packet bytes but drops the Dolby Vision record', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'shelby-dv84-lost-record-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { stdout: realFfmpeg } = await exec('which', ['ffmpeg']);
+  // Simulate a muxer that ignores the Dolby Vision option, with real packet
+  // copying and probing. Isolate the executable override in the child process.
+  await writeFile(join(dir, 'ffmpeg'), `#!/bin/bash
+args=()
+while (( $# )); do
+  if [[ "$1" == "-strict" && "$2" == "unofficial" ]]; then shift 2; continue; fi
+  args+=("$1")
+  shift
+done
+exec "$REAL_FFMPEG" "${'\$'}{args[@]}"
+`, { mode: 0o700 });
+  const run = `
+    import assert from 'node:assert/strict';
+    import { repackVideo } from './src/ffmpeg.js';
+    const attempts = [];
+    await assert.rejects(repackVideo(process.argv[1], process.argv[2], {
+      statusVideo: true, preserveHdr: true,
+      onVideoStage(update) { if (update.stage === 'attempt') attempts.push(update.videoMode); }
+    }), { reason: 'hdr_metadata_changed' });
+    assert.deepEqual(attempts, ['copy']);
+  `;
+  await exec(process.execPath, ['--input-type=module', '-e', run, dolbyFixture, join(dir, 'output.mp4')], {
+    env: { ...process.env, PATH: dir + ':' + process.env.PATH, REAL_FFMPEG: realFfmpeg.trim() }
+  });
 });

@@ -20,7 +20,7 @@ const UPLOAD_TIMEOUT_MS = 60_000;
 
 const unavailable = 'Perkhidmatan tidak tersedia buat sementara waktu. Sila cuba lagi.';
 const userMessages = {
-  hdr_unsupported: 'HDR Preserve tidak menyokong trek video atau audio ini. Hantar HEVC Main 10 HLG/HDR10 yang serasi atau pilih .hdr off untuk mod HD biasa.',
+  hdr_unsupported: 'HDR Preserve tidak menyokong trek video atau audio ini. Hantar HEVC Main 10 HLG/HDR10 atau Dolby Vision 8.4 yang serasi atau pilih .hdr off untuk mod HD biasa.',
   hdr_metadata_changed: 'HDR tidak dapat disahkan selepas pembungkusan semula. Video tidak ditukar ke SDR.',
   hdr_preference_unavailable: 'Tetapan HDR tidak dapat dibaca buat sementara waktu. Sila cuba lagi.',
   unsupported_image: 'Format gambar tidak disokong. Sila hantar JPEG, PNG atau HEIC.',
