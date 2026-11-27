@@ -340,3 +340,23 @@ test('an unrelated phone notification cannot advance a confirmed pairing', async
   assert.doesNotMatch(logs.join(), /unrelated-private-reference/);
   await manager.stop();
 });
+
+test('confirmed logout blocks refresh from reopening the revoked session after a pending save failure', async () => {
+  let failSave;
+  const savePending = new Promise((_, reject) => { failSave = reject; });
+  const { manager, sockets, http, advance } = setup({ creds: { account: {} }, save: () => savePending });
+  await manager.start();
+  sockets[0].ev.emit('creds.update');
+  await flush();
+  sockets[0].ev.emit('connection.update', {
+    connection: 'close', lastDisconnect: { error: { output: { statusCode: 401 } } }
+  });
+  failSave(new Error('synthetic write failure'));
+  await flush();
+  assert.deepEqual(http('/pairing?refresh=1').result, {
+    status: 'connection_failed', reason: 'logged_out', statusCode: 401
+  });
+  await advance(60_000);
+  assert.equal(sockets.length, 1);
+  await manager.stop();
+});
