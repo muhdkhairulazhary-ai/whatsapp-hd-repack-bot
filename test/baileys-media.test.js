@@ -508,3 +508,36 @@ test('Baileys-decoded wrapped LID command uses a verified sender route and disti
   assert.equal(sock.ws.listenerCount('CB:ack,class:message'), 0);
   assert.equal(sock.ev.listenerCount('messages.update'), 0);
 });
+
+test('server 463 after a resolved LID send is terminal, even after a positive ACK', async () => {
+  const info = [];
+  const warnings = [];
+  const handler = createMessageHandler({ log: { info: value => info.push(value), warn: value => warnings.push(value) } });
+  let sends = 0;
+  let id;
+  const sock = {
+    ev: new EventEmitter(), ws: new EventEmitter(),
+    authState: { creds: { me: { lid: '111@lid' } } },
+    async sendMessage(jid, payload, options) {
+      assert.equal(jid, '222@lid');
+      id = options.messageId;
+      sends++;
+    }
+  };
+  await handler(sock, { type: 'notify', messages: [{
+    key: { remoteJid: '222@lid', senderPn: '333@s.whatsapp.net', id: 'incoming' },
+    message: { conversation: '.ping' }
+  }] });
+  assert.equal(info.at(-1).stage, 'send_resolved');
+  sock.ws.emit('CB:ack,class:message', { attrs: { id } });
+  for (let i = 0; i < 2; i++) {
+    sock.ws.emit('CB:ack,class:message', { attrs: { id, error: '463', from: 'private@lid' } });
+  }
+  sock.ev.emit('messages.update', [{ key: { fromMe: true, id },
+    update: { status: proto.WebMessageInfo.Status.DELIVERY_ACK } }]);
+  assert.equal(sends, 1);
+  assert.equal(info.at(-1).stage, 'server_acknowledged');
+  assert.deepEqual(warnings, [{ trace: info[0].trace, stage: 'server_rejected', address: 'lid',
+    statusCode: 463, reason: 'whatsapp_reachout_restricted' }]);
+  await handler.stop();
+});

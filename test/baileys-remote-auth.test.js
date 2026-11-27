@@ -67,6 +67,12 @@ test('Redis restores credentials and Signal keys, encrypts all values, and fence
   link(first.state.creds);
   first.state.creds.pairingCode = 'TESTCODE';
   await first.saveCreds();
+  const migrationKeys = {
+    'lid-mapping': { synthetic: 'synthetic-lid' },
+    'device-list': { synthetic: ['1', '2'] },
+    tctoken: { synthetic: { token: Buffer.from('synthetic-privacy-token'), timestamp: '123' } }
+  };
+  await first.state.keys.set(migrationKeys);
   await first.state.keys.set({ 'app-state-sync-key': { a: { keyData: Buffer.from([1, 2]) } } });
   const stored = JSON.stringify(await command(['HGETALL', 'shelby:auth:{test}:state']));
   assert.doesNotMatch(stored, /synthetic|18005550000|TESTCODE|app-state-sync-key/);
@@ -76,6 +82,9 @@ test('Redis restores credentials and Signal keys, encrypts all values, and fence
   const second = await loadAuth();
   assert.equal(second.state.creds.me.id, jid);
   assert.equal(second.state.creds.pairingCode, undefined);
+  for (const [type, values] of Object.entries(migrationKeys)) {
+    assert.deepEqual((await second.state.keys.get(type, ['synthetic'])).synthetic, values.synthetic);
+  }
   assert.deepEqual((await second.state.keys.get('session', [jid]))[jid], Buffer.from('synthetic-session'));
   const sync = (await second.state.keys.get('app-state-sync-key', ['a'])).a;
   assert.ok(sync instanceof proto.Message.AppStateSyncKeyData);
