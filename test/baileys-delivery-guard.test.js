@@ -87,3 +87,24 @@ test('a native restriction notification blocks immediately and an unavailable st
   sock.ev.emit('connection.update', { connection: 'close' });
   assert.equal(timer, undefined);
 });
+
+test('a normal reconnect within the status probe interval can send immediately', async () => {
+  let probes = 0;
+  let sends = 0;
+  const guard = createDeliveryGuard({ log: {}, now: () => 0 });
+  const make = () => guard.attach({
+    ev: new EventEmitter(), ws: new EventEmitter(),
+    async sendMessage() { sends++; },
+    async fetchAccountReachoutTimelock() { probes++; return { isActive: false }; }
+  });
+  const first = make();
+  first.ev.emit('connection.update', { connection: 'open' });
+  await flush();
+  first.ev.emit('connection.update', { connection: 'close' });
+  const next = make();
+  next.ev.emit('connection.update', { connection: 'open' });
+  await next.sendMessage();
+  assert.equal(probes, 1);
+  assert.equal(sends, 1);
+  next.ev.emit('connection.update', { connection: 'close' });
+});

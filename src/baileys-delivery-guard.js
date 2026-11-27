@@ -79,7 +79,9 @@ export function createDeliveryGuard({ log, now = Date.now, schedule = setTimeout
       const update = ({ connection, reachoutTimeLock }) => {
         if (connection === 'open') {
           socket = sock;
-          if (typeof sock.fetchAccountReachoutTimelock === 'function' && !guard.blocked) report('checking');
+          if (typeof sock.fetchAccountReachoutTimelock === 'function' && state === 'unknown' && now() >= nextProbe) {
+            report('checking');
+          }
           void check();
         }
         if (socket === sock && reachoutTimeLock) observe(reachoutTimeLock);
