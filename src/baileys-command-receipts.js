@@ -14,11 +14,11 @@ export function createCommandReceipts() {
       const pending = new Map();
       const ack = ({ attrs } = {}) => {
         const entry = pending.get(attrs?.id);
-        if (!entry || entry.acknowledged) return;
+        if (!entry) return;
         if (attrs.error) {
           const statusCode = Number(attrs.error);
           entry.finish('server_rejected', Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599 ? statusCode : undefined);
-        } else {
+        } else if (!entry.acknowledged) {
           entry.acknowledged = true;
           entry.report('server_acknowledged');
         }

@@ -354,7 +354,12 @@ export function createMessageHandler({
           diagnostic('reply_blocked', { reason: 'missing_own_lid_and_sender_pn' });
           continue;
         }
-        const receipt = commandReceipts.track(sock, (stage, statusCode) => diagnostic(stage, { statusCode }));
+        const receipt = commandReceipts.track(sock, (stage, statusCode) => {
+          if (stage === 'server_rejected' && statusCode === 463) {
+            log.warn?.({ trace, stage, address, statusCode, reason: 'whatsapp_reachout_restricted' },
+              'WhatsApp rejected a command reply');
+          } else diagnostic(stage, { statusCode });
+        });
         diagnostic('sending', { route: destination !== jid ? 'sender_pn' : address, trackingReceipt: Boolean(receipt) });
         try {
           await sock.sendMessage(destination, { text: reply }, receipt ? { messageId: receipt.messageId } : undefined);
