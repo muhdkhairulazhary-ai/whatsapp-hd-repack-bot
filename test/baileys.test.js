@@ -1,7 +1,10 @@
 import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createConnectionManager } from '../src/baileys-connection.js';
+import { makeEventBuffer } from '@whiskeysockets/baileys';
+import pino from 'pino';
+import { createMessageHandler } from '../src/baileys-media.js';
+import { createConnectionManager, liveSocketOptions } from '../src/baileys-connection.js';
 import { createBaileysHandler } from '../src/baileys-http.js';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -21,7 +24,7 @@ function phoneNotification(ref = reference) {
   };
 }
 
-function setup({ creds = {}, requestCode = async () => code, save = async () => {} } = {}) {
+function setup({ creds = {}, requestCode = async () => code, save = async () => {}, eventEmitter = () => new EventEmitter(), onMessage } = {}) {
   let time = 0;
   const sockets = [];
   const timers = new Map();
@@ -45,7 +48,7 @@ function setup({ creds = {}, requestCode = async () => code, save = async () => 
     },
     makeSocket(state, notificationError) {
       const sock = {
-        ev: new EventEmitter(),
+        ev: eventEmitter(),
         state,
         notificationError,
         ws: Object.assign(new EventEmitter(), { isOpen: false }),
@@ -63,7 +66,7 @@ function setup({ creds = {}, requestCode = async () => code, save = async () => 
       sock.state.creds.pairingCode = code;
       return { code: await requestCode(), reference };
     },
-    onMessages: (sock, event) => messages.push(event)
+    onMessages: onMessage ?? ((sock, event) => messages.push(event))
   });
   function http(url = '/pairing', authorization = `Bearer ${token}`, method = 'POST') {
     const headers = {};
@@ -339,4 +342,38 @@ test('an unrelated phone notification cannot advance a confirmed pairing', async
   assert.deepEqual(stored(), {});
   assert.doesNotMatch(logs.join(), /unrelated-private-reference/);
   await manager.stop();
+});
+
+test('live socket policy skips optional startup work and delivers buffered commands after authenticated open', async () => {
+  assert.equal(liveSocketOptions.fireInitQueries, false);
+  assert.equal(liveSocketOptions.shouldSyncHistoryMessage({ syncType: 3 }), false);
+  const output = [];
+  const handler = createMessageHandler({ log: { error() {} } });
+  const { manager, sockets, http, advance } = setup({
+    eventEmitter: () => makeEventBuffer(pino({ level: 'silent' })),
+    onMessage: handler
+  });
+  await manager.start();
+  http();
+  await flush();
+  const sock = sockets[0];
+  sock.sendMessage = async (jid, message) => output.push(message.text);
+  sock.ws.isOpen = true;
+  sock.ws.emit('open');
+  sock.state.creds.account = {};
+  const send = id => sock.ev.emit('messages.upsert', { type: 'notify', messages: [
+    { key: { remoteJid: 'fixture@s.whatsapp.net', id }, message: { conversation: '.ping' } }
+  ] });
+  send('before-open');
+  await flush();
+  assert.deepEqual(output, []);
+  sock.ev.buffer();
+  send('buffered');
+  sock.ev.emit('connection.update', { connection: 'open' });
+  await flush();
+  assert.deepEqual(output, ['🏓 Pong!']);
+  await advance(30_000);
+  assert.deepEqual(output, ['🏓 Pong!', '🏓 Pong!']);
+  await manager.stop();
+  await handler.stop();
 });

@@ -1,5 +1,12 @@
 import { getPairingReference } from './baileys-pairing.js';
 
+// Live bot commands and media do not require the optional metadata queries
+// or a history import. Protocol login, crypto and live-message queries remain enabled.
+export const liveSocketOptions = Object.freeze({
+  fireInitQueries: false,
+  shouldSyncHistoryMessage: () => false
+});
+
 const CODE_TTL_MS = 60_000;
 const CONNECT_DEADLINE_MS = 60_000;
 const PHONE_NOTIFICATION_EVENT = 'CB:notification,type:link_code_companion_reg';
@@ -153,7 +160,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         }
         if (connected) {
           dispatchMessages(event);
-        } else if (restoring && event.type === 'notify') {
+        } else if ((restoring || state.creds.account) && event.type === 'notify') {
           const room = MAX_STARTUP_MESSAGES - beforeOpen.length;
           if (room > 0 && event.messages?.length) beforeOpen.push(...event.messages.slice(0, room));
         }
@@ -165,8 +172,8 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
         // marker. It also normally allows 20 seconds for initial history sync.
         // Without the marker or successful history completion, notify batches
         // can stay buffered even though the authenticated socket is open.
-        log.warn?.({ reason: 'startup_event_buffer_flushed' }, 'WhatsApp startup event buffer still pending');
         sock.ev.flush();
+        log.info({ reason: 'startup_event_buffer_flushed' }, 'Flushed pending WhatsApp startup events');
       }
 
       function onTransportOpen() {
@@ -279,7 +286,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
           lastConnectedAt = Date.now();
           report('already_linked', 'whatsapp_open');
           if (beforeOpen.length) dispatchMessages({ type: 'notify', messages: beforeOpen.splice(0) });
-          if (restoring && typeof sock.ev.isBuffering === 'function') {
+          if (typeof sock.ev.isBuffering === 'function') {
             startupTimer = schedule(checkStartupBuffer, STARTUP_BUFFER_MS);
           }
           return;

@@ -8,7 +8,7 @@ import http from 'node:http';
 import { createAccountStore } from './shelby-accounts.js';
 import { branding } from './shelby-commands.js';
 import { createMessageHandler } from './baileys-media.js';
-import { createConnectionManager } from './baileys-connection.js';
+import { createConnectionManager, liveSocketOptions } from './baileys-connection.js';
 import { createBaileysDiagnosticLogger, pairingBrowser, requestConfirmedPairingCode } from './baileys-pairing.js';
 import { createRemoteAuthLoader } from './baileys-remote-auth.js';
 import { createShutdown } from './runtime-diagnostics.js';
@@ -49,6 +49,7 @@ const connection = createConnectionManager({
   }),
   requestPairingCode: requestConfirmedPairingCode,
   makeSocket: (auth, onNotificationError) => makeWASocket({
+    ...liveSocketOptions,
     auth,
     browser: pairingBrowser,
     logger: createBaileysDiagnosticLogger(privateLogger, onNotificationError, (reason, statusCode) => {

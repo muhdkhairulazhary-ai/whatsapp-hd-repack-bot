@@ -450,3 +450,15 @@ test('512 MiB refuses UHD HEVC before encoding and keeps UHD Smart Copy with an 
   }), { reason: 'video_memory_budget' });
   assert.deepEqual(attempts, ['ffprobe', 'ffmpeg', 'verification']);
 });
+
+test('command send failures are diagnosed without logging the message or recipient', async () => {
+  const warnings = [];
+  const handler = createMessageHandler({ log: { warn: fields => warnings.push(fields), error() {} } });
+  await handler({ async sendMessage() {
+    throw Object.assign(new Error('private transport payload'), { output: { statusCode: 408 } });
+  } }, { type: 'notify', messages: [{
+    key: { remoteJid: 'fixture@s.whatsapp.net', id: 'ping-test' }, message: { conversation: '.ping' }
+  }] });
+  assert.deepEqual(warnings, [{ stage: 'command_reply', reason: 'timeout', statusCode: 408 }]);
+  await handler.stop();
+});
