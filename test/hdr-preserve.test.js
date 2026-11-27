@@ -83,3 +83,23 @@ test('HDR is off by default and preferences survive reopened account stores with
   await commandReply('.hdr off', user, accounts);
   assert.equal(await createAccountStore(dir, createHdrPreferences(env, command)).getHdr(user), false);
 });
+
+test('a registered SDR user can enable HDR without changing the H.264 Smart Copy path', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'shelby-hdr-sdr-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const input = join(dir, 'input.mp4');
+  await exec('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=25',
+    '-t', '0.4', '-c:v', 'libx264', '-threads:v', '1', '-pix_fmt', 'yuv420p', input]);
+  const user = '555@lid';
+  const accounts = createAccountStore(dir);
+  await accounts.register(user, 'Fixture');
+  await accounts.setHdr(user, true);
+  const reopened = createAccountStore(dir);
+  const result = await repackVideo(input, join(dir, 'output.mp4'), {
+    statusVideo: true, preserveHdr: await reopened.getHdr(user)
+  });
+  assert.equal(result.videoMode, 'copy');
+  assert.equal(result.hdrPreserved, undefined);
+  assert.equal(result.output.videoCodec, 'h264');
+  assert.equal(result.output.fps, '25/1');
+});

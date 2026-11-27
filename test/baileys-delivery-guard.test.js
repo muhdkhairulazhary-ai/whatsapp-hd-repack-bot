@@ -55,3 +55,35 @@ test('holds active restrictions and 463 without replay, retaining the state acro
   next.ev.emit('connection.update', { connection: 'close' });
   assert.equal(timers.size, 0);
 });
+
+test('a native restriction notification blocks immediately and an unavailable status cannot clear it', async () => {
+  let now = 0;
+  let timer;
+  let available = true;
+  const guard = createDeliveryGuard({
+    log: {}, now: () => now,
+    schedule(fn) { timer = fn; return 1; },
+    cancel() { timer = undefined; }
+  });
+  const sock = guard.attach({
+    ev: new EventEmitter(), ws: new EventEmitter(),
+    async sendMessage() {},
+    async fetchAccountReachoutTimelock() {
+      if (!available) throw new Error('Fixture network failure');
+      return { isActive: false };
+    }
+  });
+  sock.ev.emit('connection.update', { connection: 'open' });
+  await flush();
+  sock.ev.emit('connection.update', { reachoutTimeLock: { isActive: true } });
+  await assert.rejects(sock.sendMessage(), { code: 'reachout_restricted' });
+  available = false;
+  now = 60_000;
+  timer();
+  await flush();
+  assert.equal(guard.state, 'restricted');
+  sock.ev.emit('connection.update', { reachoutTimeLock: { isActive: false } });
+  await sock.sendMessage();
+  sock.ev.emit('connection.update', { connection: 'close' });
+  assert.equal(timer, undefined);
+});
