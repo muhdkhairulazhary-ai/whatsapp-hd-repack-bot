@@ -3,7 +3,7 @@ import test from 'node:test';
 import pino from 'pino';
 import {
   aesDecryptCTR, assertNodeErrorFree, derivePairingCodeKey, getBinaryNodeChild,
-  getPlatformId, initAuthCreds
+  getCompanionPlatformId, initAuthCreds
 } from '@whiskeysockets/baileys';
 import { createBaileysDiagnosticLogger, pairingBrowser, requestConfirmedPairingCode } from '../src/baileys-pairing.js';
 
@@ -36,9 +36,9 @@ test('registration query wraps the ephemeral key and returns only after an IQ re
   const hello = getBinaryNodeChild(captured, 'link_code_companion_reg');
   assert.equal(hello.attrs.stage, 'companion_hello');
   assert.equal(hello.attrs.jid, `${phone}@s.whatsapp.net`);
-  assert.equal(getBinaryNodeChild(hello, 'companion_platform_id').content, getPlatformId(pairingBrowser[1]));
+  assert.equal(getBinaryNodeChild(hello, 'companion_platform_id').content, getCompanionPlatformId(pairingBrowser));
   assert.equal(getBinaryNodeChild(hello, 'companion_platform_display').content, 'Chrome (Mac OS)');
-  assert.deepEqual(getBinaryNodeChild(hello, 'link_code_pairing_nonce').content, Buffer.from([0]));
+  assert.equal(getBinaryNodeChild(hello, 'link_code_pairing_nonce').content, '0');
   reply({
     tag: 'iq', attrs: { type: 'result' },
     content: [{

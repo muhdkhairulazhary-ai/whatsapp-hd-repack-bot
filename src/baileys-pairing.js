@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import {
   aesEncryptCTR, Browsers, bytesToCrockford, derivePairingCodeKey, getBinaryNodeChild, getBinaryNodeChildBuffer,
-  getPlatformId, jidEncode, S_WHATSAPP_NET
+  getCompanionPlatformId, jidEncode, S_WHATSAPP_NET
 } from '@whiskeysockets/baileys';
 
 const HELLO_TIMEOUT_MS = 15_000;
@@ -20,7 +20,7 @@ class PairingHelloError extends Error {
   }
 }
 
-// Baileys 6.7.24's requestPairingCode uses sendNode, which only confirms a
+// Baileys 7.0.0-rc14's requestPairingCode uses sendNode, which only confirms a
 // local write. Keep its companion_hello format and use query to correlate the IQ reply.
 export async function requestConfirmedPairingCode(sock, phone) {
   const { creds } = sock.authState;
@@ -43,9 +43,9 @@ export async function requestConfirmedPairingCode(sock, phone) {
         content: [
           { tag: 'link_code_pairing_wrapped_companion_ephemeral_pub', attrs: {}, content: wrappedKey },
           { tag: 'companion_server_auth_key_pub', attrs: {}, content: creds.noiseKey.public },
-          { tag: 'companion_platform_id', attrs: {}, content: getPlatformId(pairingBrowser[1]) },
+          { tag: 'companion_platform_id', attrs: {}, content: getCompanionPlatformId(pairingBrowser) },
           { tag: 'companion_platform_display', attrs: {}, content: `${pairingBrowser[1]} (${pairingBrowser[0]})` },
-          { tag: 'link_code_pairing_nonce', attrs: {}, content: Buffer.from([0]) }
+          { tag: 'link_code_pairing_nonce', attrs: {}, content: '0' }
         ]
       }]
     }, HELLO_TIMEOUT_MS);

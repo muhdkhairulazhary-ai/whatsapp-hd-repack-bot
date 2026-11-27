@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
-import { decodeMessageNode, proto } from '@whiskeysockets/baileys';
+import { createServer } from 'node:http';
+import { EventEmitter, once } from 'node:events';
+import { decodeMessageNode, getHttpStream, proto } from '@whiskeysockets/baileys';
 import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm, writeFile, copyFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
@@ -466,7 +467,7 @@ test('command send failures are diagnosed without logging the message or recipie
   await handler.stop();
 });
 
-test('Baileys-decoded wrapped LID command uses a verified sender route and distinguishes send from ACK', async () => {
+test('Baileys v7 keeps a wrapped command on its native LID route and distinguishes send from ACK', async () => {
   const entries = [];
   const replies = [];
   const handler = createMessageHandler({ log: { info: fields => entries.push(fields), error() {} } });
@@ -489,17 +490,15 @@ test('Baileys-decoded wrapped LID command uses a verified sender route and disti
     await handler(sock, { type: 'notify', messages: [{ ...fullMessage, message: wrapped,
       key: { ...fullMessage.key, ...overrides } }] });
   };
-  await deliver('pn-fallback', { sender_pn: '333@s.whatsapp.net' });
-  assert.deepEqual(replies, [{ jid: '333@s.whatsapp.net', payload: { text: '🏓 Pong!' } }]);
+  await deliver('native-lid', { sender_pn: '333@s.whatsapp.net' });
+  assert.deepEqual(replies, [{ jid: '111@lid', payload: { text: '🏓 Pong!' } }]);
   assert.deepEqual(entries.map(entry => entry.stage), ['received', 'handler_invoked', 'reply_prepared', 'sending',
     'server_acknowledged', 'delivery_receipt', 'send_resolved']);
   assert.equal(new Set(entries.map(entry => entry.trace)).size, 1);
   assert.doesNotMatch(JSON.stringify(entries), /@|ping|Pong/);
-  await deliver('no-fallback');
-  await deliver('mismatch', { sender_pn: '333@s.whatsapp.net', sender_lid: '555@lid' });
+
   await deliver('own', { sender_pn: '333@s.whatsapp.net' }, { fromMe: true });
   assert.equal(replies.length, 1);
-  assert.equal(entries.filter(entry => entry.stage === 'reply_blocked').length, 2);
   assert.equal(entries.at(-1).reason, 'own_message');
   sock.authState.creds.me.lid = '222@lid';
   await deliver('normal-lid');
@@ -507,4 +506,42 @@ test('Baileys-decoded wrapped LID command uses a verified sender route and disti
   await handler.stop();
   assert.equal(sock.ws.listenerCount('CB:ack,class:message'), 0);
   assert.equal(sock.ev.listenerCount('messages.update'), 0);
+});
+
+test('v7 sender aliases preserve a registered PN account while replies stay on the LID route', async () => {
+  const lookup = [];
+  const sends = [];
+  const accounts = { async get(jid) {
+    lookup.push(jid);
+    return jid === '333@s.whatsapp.net'
+      ? { name: 'Fixture', registeredAt: '2026-01-01T00:00:00Z', videos: 2, images: 1 } : {};
+  } };
+  const handler = createMessageHandler({ accounts, log: { error() {} } });
+  const { fullMessage } = decodeMessageNode({ tag: 'message', attrs: {
+    from: '111@lid', sender_pn: '333@s.whatsapp.net', id: 'fixture', t: '12'
+  } }, '444@s.whatsapp.net', '555@lid');
+  await handler({ async sendMessage(jid, payload) { sends.push({ jid, payload }); } }, {
+    type: 'notify', messages: [{ ...fullMessage, message: { conversation: '.status' } }]
+  });
+  assert.ok(lookup.includes('333@s.whatsapp.net'));
+  assert.equal(sends[0].jid, '111@lid');
+  assert.match(sends[0].payload.text, /Fixture/);
+  await handler.stop();
+});
+
+test('v7 download deadline closes a real pending media request before headers arrive', async t => {
+  const server = createServer(() => {});
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const errors = [];
+  const handler = createMessageHandler({
+    log: { error: fields => errors.push(fields) }, downloadTimeoutMs: 100,
+    downloadMediaMessage: (_msg, _type, { options }) =>
+      getHttpStream(`http://127.0.0.1:${server.address().port}`, options)
+  });
+  await handler({ async sendMessage() {} }, videoEvent('v7-http-deadline'));
+  assert.equal(errors[0].stage, 'download');
+  assert.equal(errors[0].reason, 'timeout');
+  await handler.stop();
 });

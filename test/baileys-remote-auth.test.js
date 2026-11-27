@@ -5,9 +5,10 @@ import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { useMultiFileAuthState, proto } from '@whiskeysockets/baileys';
+import { useMultiFileAuthState, proto, addTransactionCapability, jidNormalizedUser } from '@whiskeysockets/baileys';
 import { createRemoteAuthLoader, openRemoteAuth } from '../src/baileys-remote-auth.js';
 import { createConnectionManager } from '../src/baileys-connection.js';
 
@@ -293,4 +294,48 @@ test('a lost Redis lease-acquisition response releases only the attempted owner'
   }));
   assert.ok(await command(['PTTL', 'shelby:auth:{test}:lease']) > 0);
   await current.release();
+});
+
+test('v7 native LID mapping locates a persisted privacy token after an encrypted Redis restart', { skip: !hasRedis }, async t => {
+  const { command } = await redis(t);
+  const entry = new URL(import.meta.resolve('@whiskeysockets/baileys'));
+  const { LIDMappingStore } = await import(new URL('./Signal/lid-mapping.js', entry));
+  const { buildTcTokenFromJid } = await import(new URL('./Utils/tc-token-utils.js', entry));
+  const { default: pino } = await import('pino');
+  const log = pino({ level: 'silent' });
+  const lid = '987654321@lid';
+  const token = Buffer.from('synthetic-token-for-test-only');
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const legacyFile = process.env.BAILEYS_V6_AUTH_MODULE;
+  const writer = legacyFile ? (await import(pathToFileURL(legacyFile))).openRemoteAuth : openRemoteAuth;
+  const legacy = await writer({ ...options, command });
+  link(legacy.state.creds);
+  const identity = Buffer.from(legacy.state.creds.signedIdentityKey.public);
+  await legacy.saveCreds();
+  await legacy.state.keys.set({ session: { [jid]: Buffer.from('synthetic-v6-session') } });
+  await legacy.release();
+
+  let restored = await openRemoteAuth({ ...options, command });
+  assert.equal(restored.state.creds.me.id, jid);
+  assert.deepEqual(restored.state.creds.signedIdentityKey.public, identity);
+  assert.deepEqual((await restored.state.keys.get('session', [jid]))[jid], Buffer.from('synthetic-v6-session'));
+  const mapping = state => new LIDMappingStore(addTransactionCapability(state.keys, log, {
+    maxCommitRetries: 1, delayBetweenTriesMs: 0
+  }), log);
+  await mapping(restored.state).storeLIDPNMappings([{ lid, pn: jid }]);
+  await restored.state.keys.set({
+    'device-list': { [jid.split('@')[0]]: ['0', '1'] },
+    tctoken: { [lid]: { token, timestamp } }
+  });
+  await restored.release();
+
+  restored = await openRemoteAuth({ ...options, command });
+  const native = mapping(restored.state);
+  assert.equal(jidNormalizedUser(await native.getPNForLID(lid)), jid);
+  assert.deepEqual((await restored.state.keys.get('device-list', [jid.split('@')[0]]))[jid.split('@')[0]], ['0', '1']);
+  const content = await buildTcTokenFromJid({ authState: restored.state, jid,
+    getLIDForPN: pn => native.getLIDForPN(pn) });
+  assert.deepEqual(content, [{ tag: 'tctoken', attrs: { t: timestamp }, content: token }]);
+  assert.doesNotMatch(JSON.stringify(await command(['HGETALL', 'shelby:auth:{test}:state'])), /synthetic-token|987654321/);
+  await restored.release();
 });

@@ -1,3 +1,5 @@
+import { Agent as HttpsAgent } from 'node:https';
+import { Agent as DownloadAgent } from 'undici';
 import { randomBytes } from 'node:crypto';
 import { createCommandReceipts } from './baileys-command-receipts.js';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -63,15 +65,6 @@ function commandText(message) {
   return typeof text === 'string' ? text : '';
 }
 
-function commandDestination(sock, key, jid) {
-  if (!jid.endsWith('@lid') || !sock.authState || sock.authState.creds?.me?.lid) return jid;
-  // Baileys 6.7.24 dereferences the account LID during LID relay. The decoder
-  // can provide a PN for this sender in the authenticated direct-message stanza.
-  if (key.senderLid && jidNormalizedUser(key.senderLid) !== jid) return null;
-  const address = jidNormalizedUser(key.senderPn || '');
-  return /^\d+@s\.whatsapp\.net$/.test(address) ? address : null;
-}
-
 export function createMessageHandler({
   downloadMediaMessage, log, privateLogger, accounts, tempRoot = os.tmpdir(),
   concurrency = Number(process.env.BOT_MEDIA_CONCURRENCY ?? 1),
@@ -114,6 +107,19 @@ export function createMessageHandler({
   const sendText = (sock, jid, text) => Promise.resolve().then(() =>
     sock.sendMessage(jid, { text })).catch(() => {});
 
+  async function accountAddress(sock, key, jid) {
+    if (!accounts?.get || !jid.endsWith('@lid')) return jid;
+    // Prefer an existing LID account. Preserve a legacy PN account only when
+    // the authenticated stanza or Baileys' native mapping provides that alias.
+    const alias = key?.remoteJidAlt || await sock.signalRepository?.lidMapping?.getPNForLID(jid);
+    const pn = typeof alias === 'string' ? jidNormalizedUser(alias) : '';
+    if (!/^\d+@s\.whatsapp\.net$/.test(pn)) return jid;
+    const current = await accounts.get(jid);
+    if (current.registeredAt || current.videos || current.images) return jid;
+    const legacy = await accounts.get(pn);
+    return legacy.registeredAt || legacy.videos || legacy.images ? pn : jid;
+  }
+
   function observe(jid, kind, media) {
     if (!telemetry) return;
     try {
@@ -153,8 +159,14 @@ export function createMessageHandler({
     let stage = 'validation';
     let downloadTimer;
     let downloadTimedOut = false;
+    let downloadAgent;
+    let uploadAgent;
     const { signal } = controller;
-    const pauseProgress = () => progress?.pause();
+    const pauseProgress = () => {
+      progress?.pause();
+      if (downloadAgent) void downloadAgent.destroy().catch(() => {});
+      uploadAgent?.destroy();
+    };
     signal.addEventListener('abort', pauseProgress, { once: true });
     const jobTimer = setTimeout(() => controller.abort('job_deadline'), jobTimeoutMs);
     const rejectSize = () => new VideoError('validation', 'input_limit', 'Input exceeds the size limit.', { limitBytes: maxBytes });
@@ -180,7 +192,10 @@ export function createMessageHandler({
         controller.abort('download_deadline');
       }, downloadTimeoutMs);
       await timeStage('download', timing, async () => {
-        const mediaStream = await downloadMediaMessage(msg, 'stream', { options: { signal } }, {
+        // Baileys v7 forwards its dispatcher to fetch but drops options.signal.
+        downloadAgent = new DownloadAgent({ connections: 1 });
+        signal.throwIfAborted();
+        const mediaStream = await downloadMediaMessage(msg, 'stream', { options: { signal, dispatcher: downloadAgent } }, {
           logger: privateLogger, reuploadRequest: sock.updateMediaMessage
         });
         await pipeline(mediaStream, async function* limit(source) {
@@ -201,6 +216,8 @@ export function createMessageHandler({
       });
 
       clearTimeout(downloadTimer);
+      await downloadAgent.close();
+      downloadAgent = undefined;
       const imageFormat = kind === 'video' ? null : await detectImageFormat(input);
       const image = kind === 'image' || Boolean(imageFormat);
       stage = image ? 'image' : 'ffmpeg';
@@ -251,7 +268,13 @@ export function createMessageHandler({
       observation?.update({ stage: 'sending', outputBytes: metrics.output.bytes, percent: null, etaSeconds: null });
       const options = { mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS };
       if (sock.refreshMediaConn) {
-        const upload = getWAUploadToServer({ customUploadHosts: [], logger: privateLogger, options: { signal } },
+        uploadAgent = new HttpsAgent({ maxSockets: 1 });
+        const addRequest = uploadAgent.addRequest.bind(uploadAgent);
+        uploadAgent.addRequest = (request, options) => {
+          if (signal.aborted) request.destroy(new Error('Media upload cancelled'));
+          else addRequest(request, options);
+        };
+        const upload = getWAUploadToServer({ customUploadHosts: [], logger: privateLogger, fetchAgent: uploadAgent },
           sock.refreshMediaConn);
         options.upload = async (...args) => {
           signal.throwIfAborted();
@@ -273,7 +296,7 @@ export function createMessageHandler({
       else progress?.close();
       log.info?.({ stage: 'total', elapsedMs: Date.now() - started, outcome: 'ok' }, 'Media job timing');
       try {
-        await accounts?.record(jid, image ? 'image' : 'video');
+        if (accounts) await accounts.record(await accountAddress(sock, msg.key, jid), image ? 'image' : 'video');
       } catch {
         log.error({ stage: 'account', reason: 'statistics_write_failed' }, 'Account update failed');
       }
@@ -296,6 +319,8 @@ export function createMessageHandler({
       signal.removeEventListener('abort', pauseProgress);
       clearTimeout(jobTimer);
       clearTimeout(downloadTimer);
+      if (downloadAgent) await downloadAgent.destroy().catch(() => {});
+      uploadAgent?.destroy();
       if (dir) {
         await rm(dir, { recursive: true, force: true }).catch(() => log.error({
           stage: 'cleanup', reason: 'cleanup_failed'
@@ -338,7 +363,10 @@ export function createMessageHandler({
         diagnostic('handler_invoked');
         let reply;
         try {
-          reply = await commandReply(text, jid, accounts);
+          const [action] = text.trim().toLowerCase().split(/\s/, 1);
+          const accountJid = [branding.prefix + 'status', branding.prefix + 'daftar'].includes(action)
+            ? await accountAddress(sock, messageKey, jid) : jid;
+          reply = await commandReply(text, accountJid, accounts);
         } catch {
           log.error({ stage: 'account', reason: 'account_command_failed' }, 'Account command failed');
           diagnostic('handler_failed');
@@ -349,15 +377,10 @@ export function createMessageHandler({
           continue;
         }
         diagnostic('reply_prepared');
-        const destination = commandDestination(sock, messageKey, jid);
-        if (!destination) {
-          diagnostic('reply_blocked', { reason: 'missing_own_lid_and_sender_pn' });
-          continue;
-        }
         const receipt = commandReceipts.track(sock, (stage, statusCode) => diagnostic(stage, { statusCode }));
-        diagnostic('sending', { route: destination !== jid ? 'sender_pn' : address, trackingReceipt: Boolean(receipt) });
+        diagnostic('sending', { route: address, trackingReceipt: Boolean(receipt) });
         try {
-          await sock.sendMessage(destination, { text: reply }, receipt ? { messageId: receipt.messageId } : undefined);
+          await sock.sendMessage(jid, { text: reply }, receipt ? { messageId: receipt.messageId } : undefined);
           diagnostic('send_resolved');
         } catch (error) {
           receipt?.cancel();
