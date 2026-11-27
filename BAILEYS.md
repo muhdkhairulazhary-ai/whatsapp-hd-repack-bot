@@ -252,7 +252,7 @@ After an approved deployment, set `SHELBY_WA_TOKEN_DIAGNOSTICS=1` only for a sho
 
 - `native_lookup` reports the lookup address family, token freshness, and whether the token was attached to the outgoing stanza. `alternate_pn_lookup` checks the PN slot only when the native LID slot lacks a fresh token and Baileys supplies a trusted mapping. A fresh alternate and a missing native token identify the orphaned-slot case. The alternate read never contributes a token to the send.
 - `token_stored` reports the address family after an accepted write. `token_acquisition` reports whether a particular notification or IQ path stored a fresh token. Background notifications and recovery queries may lack a command trace.
-- `reachout_status` uses Baileys' native status query on the existing connection after a tracked 463, once per socket and at most once per minute. `inactive` reports the query result and does not rule out other policy or device-specific rejections.
+- Outbound restriction status is logged independently of the token diagnostics flag. Filter for `WhatsApp outbound delivery state` or check Control Center. An `available` state does not rule out other policy or device-specific rejections.
 - `history_notification` records whether an incoming history notification was processed. PR #19's disabled history import also skips v7's history-based token and LID seeding. Native live token notifications and IQ paths still run. Leave history policy unchanged until production evidence identifies the missing path.
 
 The logs contain no addresses, credentials, tokens, protocol frames or message bodies. There is no message replay, token transfer, or authentication reset.
