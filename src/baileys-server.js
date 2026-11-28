@@ -16,7 +16,7 @@ import { createBaileysDiagnosticLogger, pairingBrowser, requestConfirmedPairingC
 import { createRemoteAuthLoader } from './baileys-remote-auth.js';
 import { createShutdown } from './runtime-diagnostics.js';
 import { createBaileysHandler } from './baileys-http.js';
-import { readBridgeConfig, DELIVERY_PATH } from './studio-bridge.js';
+import { BridgeConfigError, readBridgeConfig, DELIVERY_PATH } from './studio-bridge.js';
 import { createStudioDelivery } from './studio-delivery.js';
 import { redisCommand } from './admin/analytics.js';
 import { startAdmin } from './admin/admin.js';
@@ -47,17 +47,19 @@ const admin = startAdmin({
 const accounts = createAccountStore(process.env.BOT_ACCOUNTS_DIR || './shelby-accounts', createHdrPreferences());
 let studio;
 try {
-  const bridge = readBridgeConfig(process.env.SHELBY_STUDIO_BRIDGE_KEY, process.env.SHELBY_STUDIO_API_ORIGIN);
+  const bridge = readBridgeConfig();
   if (bridge) {
-    const endpoint = new URL(process.env.BAILEYS_AUTH_REDIS_URL);
-    const token = process.env.BAILEYS_AUTH_REDIS_TOKEN?.trim();
-    if (endpoint.protocol !== 'https:' || !token) throw new Error();
-    const redis = redisCommand(endpoint, token);
-    studio = createStudioDelivery({ ...bridge, guard: deliveryGuard, socket: () => connection.deliverySocket, privateLogger,
+    const { key, origin, redisUrl, redisToken } = bridge;
+    const redis = redisCommand(redisUrl, redisToken);
+    studio = createStudioDelivery({ key, origin, guard: deliveryGuard, socket: () => connection.deliverySocket, privateLogger,
       reserve: async id => await redis(['SET', 'shelby:studio:delivery:' + id, '1', 'NX', 'EX', 86400]) === 'OK' });
   }
-} catch {
-  log.warn('Studio delivery disabled due to invalid bridge or Redis configuration');
+} catch (error) {
+  if (error instanceof BridgeConfigError) {
+    for (const issue of error.issues) log.warn(issue, 'Studio delivery disabled due to invalid configuration');
+  } else {
+    log.warn({ reason: 'initialization_failed' }, 'Studio delivery disabled');
+  }
 }
 const onMessages = createMessageHandler({ downloadMediaMessage, log, privateLogger, accounts, deliveryGuard, tokenDiagnostics, studioLink: studio?.link, telemetry: admin?.telemetry });
 

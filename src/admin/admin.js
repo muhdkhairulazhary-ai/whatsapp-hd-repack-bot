@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { createAnalytics, redisCommand } from './analytics.js';
+import { redisRestUrl } from '../redis-rest-url.js';
 import { memorySnapshot } from '../runtime-diagnostics.js';
 
 const COOKIE = '__Host-shelby-admin';
@@ -24,14 +25,6 @@ function httpsRoot(value) {
   } catch { /* Missing or invalid URL. */ }
 }
 
-function redisEndpoint(value) {
-  try {
-    const url = new URL(value);
-    if (url.protocol === 'https:' && !url.username && !url.password && !url.search &&
-        !url.hash && url.pathname === '/') return url;
-  } catch { /* Missing or invalid Redis endpoint. */ }
-}
-
 function inspectConfig(env) {
   const enabled = env.SHELBY_ADMIN_ENABLED?.trim();
   if (!enabled || enabled === '0') return { state: 'disabled' };
@@ -39,7 +32,7 @@ function inspectConfig(env) {
   if (enabled !== '1') return invalid('SHELBY_ADMIN_ENABLED');
 
   const origin = httpsRoot(env.SHELBY_ADMIN_ORIGIN?.trim());
-  const redis = redisEndpoint(env.BAILEYS_AUTH_REDIS_URL);
+  const redis = redisRestUrl(env.BAILEYS_AUTH_REDIS_URL);
   const token = env.SHELBY_ADMIN_TOKEN;
   const key = env.SHELBY_ANALYTICS_KEY;
   const redisToken = env.BAILEYS_AUTH_REDIS_TOKEN?.trim();

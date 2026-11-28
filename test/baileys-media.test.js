@@ -568,3 +568,20 @@ test('a repeated media stanza using Baileys PN and LID aliases starts one job', 
   assert.equal(handler.snapshot().queuedJobs, 0);
   await handler.stop();
 });
+
+test('.linkstudio explicitly reports an unavailable bridge and still follows the delivery guard', async () => {
+  const replies = [];
+  const guard = { blocked: false };
+  const onMessages = createMessageHandler({ log: { info() {}, error() {} }, deliveryGuard: guard });
+  const socket = { async sendMessage(jid, message) { replies.push({ jid, ...message }); } };
+  const event = id => ({ type: 'notify', messages: [{ key: { id, remoteJid: '123456@lid' },
+    message: { conversation: '.linkstudio example-code' } }] });
+  await onMessages(socket, event('link-disabled'));
+  assert.equal(replies.length, 1);
+  assert.match(replies[0].text, /Web Studio tidak tersedia/);
+  assert.doesNotMatch(replies[0].text, /example-code/);
+  guard.blocked = true;
+  await onMessages(socket, event('restricted'));
+  assert.equal(replies.length, 1);
+  await onMessages.stop();
+});

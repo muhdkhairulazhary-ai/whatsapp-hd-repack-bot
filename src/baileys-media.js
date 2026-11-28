@@ -328,7 +328,7 @@ export function createMessageHandler({
       const messageKey = msg.key ?? {};
       const jid = jidNormalizedUser(messageKey.remoteJid || '');
       const text = commandText(msg.message);
-      const studioCommand = studioLink && /^\s*\.linkstudio(?:\s|$)/i.test(text);
+      const studioCommand = /^\s*\.linkstudio(?:\s|$)/i.test(text);
       const candidate = studioCommand || text.trimStart().startsWith(branding.prefix) || /^\s*(ping|menu|help)(?:\s|$)/i.test(text);
       const trace = candidate ? randomBytes(8).toString('hex') : undefined;
       const address = jid.endsWith('@lid') ? 'lid' : jid.endsWith('@s.whatsapp.net') ? 'pn' : 'other';
@@ -356,12 +356,16 @@ export function createMessageHandler({
         diagnostic('handler_invoked');
         let reply;
         try {
-          const [action] = text.trim().toLowerCase().split(/\s/, 1);
-          const accountJid = [branding.prefix + 'status', branding.prefix + 'daftar', branding.prefix + 'hdr'].includes(action)
-            ? await accountAddress(sock, messageKey, jid) : jid;
-          reply = studioCommand
-            ? await studioLink(jid, text.trim().split(/\s+/).slice(1))
-            : await commandReply(text, accountJid, accounts);
+          if (studioCommand) {
+            reply = studioLink
+              ? await studioLink(jid, text.trim().split(/\s+/).slice(1))
+              : 'Pautan WhatsApp ke Web Studio tidak tersedia buat masa ini. Anda masih boleh muat turun video di Web Studio.';
+          } else {
+            const [action] = text.trim().toLowerCase().split(/\s/, 1);
+            const accountJid = [branding.prefix + 'status', branding.prefix + 'daftar', branding.prefix + 'hdr'].includes(action)
+              ? await accountAddress(sock, messageKey, jid) : jid;
+            reply = await commandReply(text, accountJid, accounts);
+          }
         } catch {
           log.error({ stage: 'account', reason: 'account_command_failed' }, 'Account command failed');
           diagnostic('handler_failed');
