@@ -16,6 +16,9 @@ import { createBaileysDiagnosticLogger, pairingBrowser, requestConfirmedPairingC
 import { createRemoteAuthLoader } from './baileys-remote-auth.js';
 import { createShutdown } from './runtime-diagnostics.js';
 import { createBaileysHandler } from './baileys-http.js';
+import { readBridgeConfig, DELIVERY_PATH } from './studio-bridge.js';
+import { createStudioDelivery } from './studio-delivery.js';
+import { redisCommand } from './admin/analytics.js';
 import { startAdmin } from './admin/admin.js';
 
 const log = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -42,7 +45,21 @@ const admin = startAdmin({
 });
 
 const accounts = createAccountStore(process.env.BOT_ACCOUNTS_DIR || './shelby-accounts', createHdrPreferences());
-const onMessages = createMessageHandler({ downloadMediaMessage, log, privateLogger, accounts, deliveryGuard, tokenDiagnostics, telemetry: admin?.telemetry });
+let studio;
+try {
+  const bridge = readBridgeConfig(process.env.SHELBY_STUDIO_BRIDGE_KEY, process.env.SHELBY_STUDIO_API_ORIGIN);
+  if (bridge) {
+    const endpoint = new URL(process.env.BAILEYS_AUTH_REDIS_URL);
+    const token = process.env.BAILEYS_AUTH_REDIS_TOKEN?.trim();
+    if (endpoint.protocol !== 'https:' || !token) throw new Error();
+    const redis = redisCommand(endpoint, token);
+    studio = createStudioDelivery({ ...bridge, guard: deliveryGuard, socket: () => connection.deliverySocket, privateLogger,
+      reserve: async id => await redis(['SET', 'shelby:studio:delivery:' + id, '1', 'NX', 'EX', 86400]) === 'OK' });
+  }
+} catch {
+  log.warn('Studio delivery disabled due to invalid bridge or Redis configuration');
+}
+const onMessages = createMessageHandler({ downloadMediaMessage, log, privateLogger, accounts, deliveryGuard, tokenDiagnostics, studioLink: studio?.link, telemetry: admin?.telemetry });
 
 const loadRemoteAuth = createRemoteAuthLoader({ authDir, log });
 
@@ -70,6 +87,10 @@ const connection = createConnectionManager({
 
 const baseHandler = createBaileysHandler(connection, pairingToken);
 const server = http.createServer((req, res) => {
+  if (studio && req.url === DELIVERY_PATH) {
+    void studio.route(req, res).catch(() => res.destroy());
+    return;
+  }
   if (!admin || !/^\/(?:dashboard|api\/admin)(?:[/?]|$)/.test(req.url)) return baseHandler(req, res);
   void Promise.resolve().then(() => admin.route(req, res)).then(handled => {
     if (!handled) baseHandler(req, res);
@@ -82,7 +103,7 @@ const server = http.createServer((req, res) => {
 server.listen(port, '0.0.0.0', () => log.info({ port, bot: branding.fullName }, 'Health server listening'));
 void connection.start();
 
-const shutdown = createShutdown({ server, media: onMessages, connection, log });
+const shutdown = createShutdown({ server, media: { snapshot: onMessages.snapshot, stop: () => Promise.all([onMessages.stop(), studio?.stop()]) }, connection, log });
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => { void shutdown(signal); });
 }

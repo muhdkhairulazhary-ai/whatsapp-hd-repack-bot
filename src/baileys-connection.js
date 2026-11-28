@@ -108,7 +108,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
       let saves = Promise.resolve();
       let saveFailed = false;
       let closing = false;
-      const session = { close };
+      const session = { close, sock };
       let closingTask;
       active = session;
       const isCurrent = () => active === session && !closing;
@@ -336,6 +336,7 @@ export function createConnectionManager({ loadAuth, makeSocket, requestPairingCo
   return {
     start,
     get connected() { return connected; },
+    get deliverySocket() { return connected ? active?.sock : undefined; },
     get reason() { return status.reason ?? null; },
     get lastConnectedAt() { return lastConnectedAt; },
     requestPairing(refresh = false) {

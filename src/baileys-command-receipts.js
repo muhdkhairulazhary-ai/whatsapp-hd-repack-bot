@@ -7,7 +7,7 @@ const { DELIVERY_ACK, READ, PLAYED } = proto.WebMessageInfo.Status;
 export function createCommandReceipts() {
   const sockets = new Map();
 
-  function track(sock, report) {
+  function track(sock, report, windowMs = RECEIPT_WINDOW_MS) {
     if (!sock.ws?.on || !sock.ws?.off || !sock.ev?.on || !sock.ev?.off) return null;
     let socket = sockets.get(sock);
     if (!socket) {
@@ -52,7 +52,7 @@ export function createCommandReceipts() {
       clearTimeout(timer);
       if (stage) report(stage, statusCode);
     }
-    const timer = setTimeout(() => finish('receipt_window_ended'), RECEIPT_WINDOW_MS);
+    const timer = setTimeout(() => finish('receipt_window_ended'), windowMs);
     timer.unref();
     pending.set(messageId, { finish, report, acknowledged: false });
     return { messageId, cancel: () => finish() };
