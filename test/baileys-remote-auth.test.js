@@ -50,7 +50,7 @@ function link(creds) {
 test('Redis restores credentials and Signal keys, encrypts all values, and fences competing writers', { skip: !hasRedis }, async t => {
   const { command } = await redis(t);
   const env = {
-    BAILEYS_AUTH_REDIS_URL: 'https://redis.example.test',
+    BAILEYS_AUTH_REDIS_URL: ' https://redis.example.test/// ',
     BAILEYS_AUTH_REDIS_TOKEN: 'synthetic-token',
     BAILEYS_AUTH_ENCRYPTION_KEY: options.key.toString('base64'),
     BAILEYS_AUTH_SESSION_ID: options.session

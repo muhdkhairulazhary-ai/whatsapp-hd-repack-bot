@@ -2,6 +2,7 @@ import { BufferJSON, initAuthCreds, proto } from '@whiskeysockets/baileys';
 import { createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { redisRestUrl } from './redis-rest-url.js';
 
 const LEASE_MS = 45_000;
 const RENEW_MS = 15_000;
@@ -27,10 +28,8 @@ function settings(env) {
   const key = Buffer.from(rawKey, 'base64');
   const session = env.BAILEYS_AUTH_SESSION_ID || 'shelby';
   if (!url && !token && !rawKey && env.BAILEYS_AUTH_MIGRATE_LOCAL !== '1') return null;
-  let endpoint;
-  try { endpoint = new URL(url); } catch { throw failure('auth_configuration_invalid'); }
-  if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash ||
-      endpoint.pathname !== '/' || !token || key.length !== 32 || key.toString('base64') !== rawKey ||
+  const endpoint = redisRestUrl(url);
+  if (!endpoint || !token || key.length !== 32 || key.toString('base64') !== rawKey ||
       !/^[A-Za-z0-9_-]{1,64}$/.test(session)) {
     throw failure('auth_configuration_invalid');
   }
