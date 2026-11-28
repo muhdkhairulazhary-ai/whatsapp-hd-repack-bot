@@ -43,7 +43,7 @@ jobs:
       - name: Smoke-test the dashboard in the production entrypoint
         run: bash scripts/check-dashboard-startup.sh whatsapp-hd-baileys:test
       - name: Test media processing in the 512 MiB Docker image
-        run: docker run --rm --memory=512m --memory-swap=512m whatsapp-hd-baileys:test node --test --test-concurrency=1 test/baileys-media.test.js test/shelby.test.js test/video-size.test.js test/ffmpeg-diagnostics.test.js test/video-progress.test.js test/turbo-engine.test.js test/hdr-preserve.test.js
+        run: docker run --rm --memory=512m --memory-swap=512m whatsapp-hd-baileys:test node --test --test-concurrency=1 test/baileys-media.test.js test/shelby.test.js test/video-size.test.js test/ffmpeg-diagnostics.test.js test/video-progress.test.js test/turbo-engine.test.js test/hdr-preserve.test.js test/studio-delivery.test.js
       - name: Benchmark video size control in the 512 MiB Docker image
         run: docker run --rm --cpus=1 --memory=512m --memory-swap=512m whatsapp-hd-baileys:test node scripts/benchmark-video-size.js
       - name: Benchmark Turbo candidates in the 512 MiB Docker image

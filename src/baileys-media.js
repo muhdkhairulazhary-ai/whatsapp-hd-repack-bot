@@ -1,13 +1,13 @@
-import { Agent as HttpsAgent } from 'node:https';
 import { Agent as DownloadAgent } from 'undici';
 import { randomBytes } from 'node:crypto';
+import { sendProcessedMedia } from './baileys-send-media.js';
 import { createCommandReceipts } from './baileys-command-receipts.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { getWAUploadToServer, jidNormalizedUser } from '@whiskeysockets/baileys';
+import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { branding, commandReply } from './shelby-commands.js';
 import { detectImageFormat, processImage } from './shelby-image.js';
 import { HIGH_RES_TRANSCODE_HEADROOM, mediaMemoryLimit, memorySnapshot, timeStage } from './runtime-diagnostics.js';
@@ -16,7 +16,6 @@ import { repackVideo, VideoError } from './ffmpeg.js';
 
 export const MAX_STATUS_INPUT_BYTES = 150_000_000;
 const DOWNLOAD_TIMEOUT_MS = 180_000;
-const UPLOAD_TIMEOUT_MS = 60_000;
 
 const unavailable = 'Perkhidmatan tidak tersedia buat sementara waktu. Sila cuba lagi.';
 const userMessages = {
@@ -70,7 +69,7 @@ function commandText(message) {
 }
 
 export function createMessageHandler({
-  downloadMediaMessage, log, privateLogger, accounts, deliveryGuard, tokenDiagnostics, tempRoot = os.tmpdir(),
+  downloadMediaMessage, log, privateLogger, accounts, deliveryGuard, tokenDiagnostics, studioLink, tempRoot = os.tmpdir(),
   concurrency = Number(process.env.BOT_MEDIA_CONCURRENCY ?? 1),
   queueCapacity = Number(process.env.BOT_MEDIA_QUEUE_SIZE ?? 4),
   jobTimeoutMs = Number(process.env.BOT_MEDIA_JOB_TIMEOUT_MS ?? 900_000),
@@ -165,12 +164,10 @@ export function createMessageHandler({
     let downloadTimer;
     let downloadTimedOut = false;
     let downloadAgent;
-    let uploadAgent;
     const { signal } = controller;
     const pauseProgress = () => {
       progress?.pause();
       if (downloadAgent) void downloadAgent.destroy().catch(() => {});
-      uploadAgent?.destroy();
     };
     signal.addEventListener('abort', pauseProgress, { once: true });
     const jobTimer = setTimeout(() => controller.abort('job_deadline'), jobTimeoutMs);
@@ -281,31 +278,9 @@ export function createMessageHandler({
       if (signal.aborted) throw new VideoError(stage, 'timeout', 'Media job timed out.');
       progress?.update('sending');
       observation?.update({ stage: 'sending', outputBytes: metrics.output.bytes, percent: null, etaSeconds: null });
-      const options = { mediaUploadTimeoutMs: UPLOAD_TIMEOUT_MS };
-      if (sock.refreshMediaConn) {
-        uploadAgent = new HttpsAgent({ maxSockets: 1 });
-        const addRequest = uploadAgent.addRequest.bind(uploadAgent);
-        uploadAgent.addRequest = (request, options) => {
-          if (signal.aborted) request.destroy(new Error('Media upload cancelled'));
-          else addRequest(request, options);
-        };
-        const upload = getWAUploadToServer({ customUploadHosts: [], logger: privateLogger, fetchAgent: uploadAgent },
-          sock.refreshMediaConn);
-        options.upload = async (...args) => {
-          signal.throwIfAborted();
-          const result = await upload(...args);
-          signal.throwIfAborted();
-          return result;
-        };
-      }
-      await timeStage('upload', timing, () => sock.sendMessage(jid, {
-        [image ? 'image' : 'video']: { url: output },
-        mimetype,
-        // Shelby+ already bounded conversion. Skip Baileys' second full-media decode.
-        jpegThumbnail: Buffer.alloc(0),
-        width: metrics.output.width,
-        height: metrics.output.height
-      }, options));
+      await timeStage('upload', timing, () => sendProcessedMedia(sock, jid, {
+        path: output, mimetype, image, width: metrics.output.width, height: metrics.output.height
+      }, { signal, privateLogger }));
       observation?.finish('success');
       if (!signal.aborted) progress?.finish('completed');
       else progress?.close();
@@ -336,7 +311,6 @@ export function createMessageHandler({
       clearTimeout(jobTimer);
       clearTimeout(downloadTimer);
       if (downloadAgent) await downloadAgent.destroy().catch(() => {});
-      uploadAgent?.destroy();
       if (dir) {
         await rm(dir, { recursive: true, force: true }).catch(() => log.error({
           stage: 'cleanup', reason: 'cleanup_failed'
@@ -354,7 +328,8 @@ export function createMessageHandler({
       const messageKey = msg.key ?? {};
       const jid = jidNormalizedUser(messageKey.remoteJid || '');
       const text = commandText(msg.message);
-      const candidate = text.trimStart().startsWith(branding.prefix) || /^\s*(ping|menu|help)(?:\s|$)/i.test(text);
+      const studioCommand = studioLink && /^\s*\.linkstudio(?:\s|$)/i.test(text);
+      const candidate = studioCommand || text.trimStart().startsWith(branding.prefix) || /^\s*(ping|menu|help)(?:\s|$)/i.test(text);
       const trace = candidate ? randomBytes(8).toString('hex') : undefined;
       const address = jid.endsWith('@lid') ? 'lid' : jid.endsWith('@s.whatsapp.net') ? 'pn' : 'other';
       const diagnostic = (stage, fields) => log.info?.({ trace, stage, address, ...fields }, 'WhatsApp command');
@@ -384,7 +359,9 @@ export function createMessageHandler({
           const [action] = text.trim().toLowerCase().split(/\s/, 1);
           const accountJid = [branding.prefix + 'status', branding.prefix + 'daftar', branding.prefix + 'hdr'].includes(action)
             ? await accountAddress(sock, messageKey, jid) : jid;
-          reply = await commandReply(text, accountJid, accounts);
+          reply = studioCommand
+            ? await studioLink(jid, text.trim().split(/\s+/).slice(1))
+            : await commandReply(text, accountJid, accounts);
         } catch {
           log.error({ stage: 'account', reason: 'account_command_failed' }, 'Account command failed');
           diagnostic('handler_failed');
