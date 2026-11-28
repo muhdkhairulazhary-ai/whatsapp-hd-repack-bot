@@ -23,3 +23,6 @@ baileys-auth/
 **/identity-key-*.json
 
 /shelby-accounts/
+
+# Synthetic media regression fixture
+!test/fixtures/dolby-vision-84.mov

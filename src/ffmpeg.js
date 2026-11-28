@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
 import { createFfmpegProgressReader } from './ffmpeg-progress.js';
 import { createStderrDiagnostics, describeFfmpegInput } from './ffmpeg-diagnostics.js';
 import { planHevcSize } from './video-size.js';
@@ -166,7 +167,7 @@ async function probeVideo(inputPath, statusVideo, signal, stage = 'validation', 
     : 'format=duration';
   const output = await runTool('ffprobe', [
     '-v', 'error', ...(statusVideo ? ['-threads', '1', '-protocol_whitelist', 'file', '-f', 'mov'] : []),
-    '-show_entries', hdr ? entries + ':stream=color_space,color_primaries,color_range,chroma_location,extradata_hash:stream_side_data' : entries,
+    '-show_entries', hdr ? entries + ':stream=color_space,color_primaries,color_range,chroma_location,sample_rate,channel_layout,extradata_hash:stream_side_data' : entries,
     ...(hdr ? ['-show_data_hash', 'sha256'] : []), '-of', 'json', inputPath
   ], { stage, timeoutMs: 15_000, captureOutput: true, signal });
   let metadata;
@@ -240,8 +241,17 @@ function verifyStatusVideo(input, output, preserveMatrix) {
 }
 
 const hdrTransfers = new Set(['arib-std-b67', 'smpte2084']);
-const dolbyVision = video => /^(dvhe|dvh1)$/.test(video.codec_tag_string) ||
-  video.side_data_list?.some(side => /dovi|dolby vision/i.test(side.side_data_type || ''));
+const dolbyVisionRecords = video =>
+  (video.side_data_list ?? []).filter(side => /dovi|dolby vision/i.test(side.side_data_type || ''));
+const dolbyVision = video => /^(dvhe|dvh1)$/.test(video.codec_tag_string) || dolbyVisionRecords(video).length > 0;
+
+function compatibleDolbyVision84(video) {
+  const [record, extra] = dolbyVisionRecords(video);
+  return record?.side_data_type === 'DOVI configuration record' && !extra &&
+    video.color_transfer === 'arib-std-b67' && record.dv_profile === 8 &&
+    record.dv_bl_signal_compatibility_id === 4 && record.rpu_present_flag === 1 &&
+    record.bl_present_flag === 1 && record.el_present_flag === 0;
+}
 
 function isHdrCandidate(video) {
   return dolbyVision(video) || hdrTransfers.has(video.color_transfer) ||
@@ -249,22 +259,23 @@ function isHdrCandidate(video) {
 }
 
 function hdrPacketFingerprint(file, track, signal) {
-  // Packet hashes cover embedded HEVC metadata (including mastering-display,
-  // content-light and HLG SEI). Timing is compared without decoding any frames.
+  // Packet hashes cover the Dolby Vision RPU and other embedded HEVC metadata.
+  // Timing and AAC priming are compared without decoding any frames.
   return runTool('ffprobe', [
     '-v', 'error', '-threads', '1', '-protocol_whitelist', 'file', '-f', 'mov',
     '-select_streams', String(track.index), '-show_packets', '-show_data_hash', 'sha256',
-    '-show_entries', 'packet=pts_time,dts_time,duration_time,data_hash', '-of', 'compact=p=0', file
+    '-show_entries', 'packet=pts_time,dts_time,duration_time,data_hash:packet_side_data=side_data_type,skip_samples,discard_padding', '-of', 'compact=p=0', file
   ], { stage: 'verification', timeoutMs: 30_000, hashOutput: true, signal });
 }
 
 async function remuxHdr(inputPath, outputPath, input, { signal, convert, onVideoStage, onStage, inputBytes, maxOutputBytes }) {
   const { video, audio } = input;
+  const hasDolbyVision = dolbyVision(video);
   if (video.codec_name !== 'hevc' || video.profile !== 'Main 10' || video.pix_fmt !== 'yuv420p10le' ||
       !hdrTransfers.has(video.color_transfer) || video.color_primaries !== 'bt2020' ||
       !['bt2020nc', 'bt2020c'].includes(video.color_space) || !/^(hvc1|hev1)$/.test(video.codec_tag_string) ||
-      !standardRotation(video) || dolbyVision(video) || (audio && !compatibleAudio(audio))) {
-    throw new VideoError('validation', 'hdr_unsupported', 'HDR preservation requires a compatible Main 10 HLG/HDR10 source.');
+      !standardRotation(video) || (hasDolbyVision && !compatibleDolbyVision84(video)) || (audio && !compatibleAudio(audio))) {
+    throw new VideoError('validation', 'hdr_unsupported', 'HDR preservation requires a compatible Main 10 HLG, HDR10 or Dolby Vision 8.4 source.');
   }
   onVideoStage?.({ stage: 'attempt', videoMode: 'copy', durationSeconds: input.duration, attempt: 1,
     ...mediaMetrics(input, inputBytes) });
@@ -272,6 +283,8 @@ async function remuxHdr(inputPath, outputPath, input, { signal, convert, onVideo
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-threads', '1', '-protocol_whitelist', 'file',
     '-copyts', '-f', 'mov', '-noautorotate', '-i', inputPath, '-map', `0:${video.index}`,
     ...(audio ? ['-map', `0:${audio.index}`] : []), '-c', 'copy', '-tag:v', video.codec_tag_string,
+    // FFmpeg's MP4 muxer omits the Dolby Vision configuration record by default.
+    ...(hasDolbyVision ? ['-strict', 'unofficial'] : []),
     '-avoid_negative_ts', 'disabled', '-map_metadata', '-1', '-map_chapters', '-1', '-movflags', '+faststart+write_colr', outputPath
   ]);
   onVideoStage?.({ stage: 'validating' });
@@ -284,11 +297,18 @@ async function remuxHdr(inputPath, outputPath, input, { signal, convert, onVideo
     const actual = await probeVideo(outputPath, true, signal, 'verification', true);
     const fields = ['codec_name', 'codec_tag_string', 'profile', 'pix_fmt', 'width', 'height', 'avg_frame_rate',
       'r_frame_rate', 'color_primaries', 'color_transfer', 'color_space', 'color_range', 'chroma_location',
-      'sample_aspect_ratio', 'start_time', 'duration', 'extradata_hash', 'side_data_list'];
+      'sample_aspect_ratio', 'start_time', 'duration', 'extradata_hash'];
+    const audioFields = ['codec_name', 'profile', 'sample_rate', 'channels', 'channel_layout', 'extradata_hash'];
+    const streamSideData = stream => [...(stream.side_data_list ?? [])].sort(
+      (a, b) => a.side_data_type.localeCompare(b.side_data_type)
+    );
     const mismatched = () => new VideoError('verification', 'hdr_metadata_changed', 'Could not verify lossless HDR output.');
     if (!/^(isom|mp4)/.test(actual.brand) || !actual.video.extradata_hash ||
-        fields.some(key => JSON.stringify(video[key]) !== JSON.stringify(actual.video[key])) ||
-        Boolean(audio) !== Boolean(actual.audio) || (audio && !compatibleAudio(actual.audio))) throw mismatched();
+        fields.some(key => video[key] !== actual.video[key]) ||
+        !isDeepStrictEqual(streamSideData(video), streamSideData(actual.video)) ||
+        (hasDolbyVision && !compatibleDolbyVision84(actual.video)) ||
+        Boolean(audio) !== Boolean(actual.audio) ||
+        (audio && audioFields.some(key => audio[key] !== actual.audio[key]))) throw mismatched();
     for (const [before, after] of [[video, actual.video], ...(audio ? [[audio, actual.audio]] : [])]) {
       const hash = await hdrPacketFingerprint(inputPath, before, signal);
       if (hash !== await hdrPacketFingerprint(outputPath, after, signal)) throw mismatched();

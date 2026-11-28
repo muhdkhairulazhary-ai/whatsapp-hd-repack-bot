@@ -20,3 +20,4 @@ README.md
 **/identity-key-*.json
 
 /shelby-accounts
+!test/fixtures/dolby-vision-84.mov
